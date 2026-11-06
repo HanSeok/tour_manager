@@ -3,11 +3,32 @@
 const dayStart_ = (date) => new Date(`${date}T00:00:00${config_().offset}`);
 const atMin_ = (date, min) => new Date(dayStart_(date).getTime() + min * 60000);
 
+// Gmail-created hotel bookings can be all-day blocks; only stay-like titles count (an all-day "여행" block must not).
+const STAY_TITLE_RE = /^stay at|숙박|호텔|hotel|ホテル/i;
+const ALL_DAY_CHECKIN = '15:00';
+const ALL_DAY_CHECKOUT = '11:00';
+
+/** Trip calendar: 설정 › 캘린더 ID, else the default calendar. */
+function calendar_() {
+  const id = config_().calendarId;
+  if (!id) return CalendarApp.getDefaultCalendar();
+  return CalendarApp.getCalendarById(id) || fail_(`캘린더 ID '${id.slice(0, 40)}'를 찾을 수 없습니다. 설정 탭의 캘린더 ID를 확인하세요`);
+}
+
 function getTripEvents_() {
-  return CalendarApp.getDefaultCalendar()
+  return calendar_()
     .getEvents(dayStart_(config_().start), atMin_(config_().end, 24 * 60))
-    .filter((ev) => !ev.isAllDayEvent())
-    .map(toEvent_);
+    .map((ev) => (ev.isAllDayEvent() ? allDayStay_(ev) : toEvent_(ev)))
+    .filter(Boolean);
+}
+
+/** Multi-day all-day stay → timed check-in/check-out event; any other all-day event → null (ignored). */
+function allDayStay_(ev) {
+  const tz = Session.getScriptTimeZone(); // all-day dates are midnights in the script zone
+  const first = Utilities.formatDate(ev.getAllDayStartDate(), tz, 'yyyy-MM-dd');
+  const last = Utilities.formatDate(ev.getAllDayEndDate(), tz, 'yyyy-MM-dd'); // exclusive end = checkout day
+  if (first === last || !STAY_TITLE_RE.test(ev.getTitle())) return null;
+  return { ...toEvent_(ev), startDate: first, start: ALL_DAY_CHECKIN, endDate: last, end: ALL_DAY_CHECKOUT };
 }
 
 function toEvent_(ev) {
@@ -34,7 +55,8 @@ function routeEventsOn_(cal, date) {
 }
 
 /** Replaces the dashboard-registered events of `date` with `items` [{title,startMin,endMin,location,placeId}]. */
-function registerRoute(date, items) {
+function registerRoute(date, items, key) {
+  requireEdit_(key);
   const cfg = requireConfig_();
   if (!DATE_RE.test(String(date)) || date < cfg.start || date > cfg.end) fail_('날짜가 여행 기간이 아닙니다');
   if (!Array.isArray(items) || items.length > 30) fail_('등록할 일정 목록이 올바르지 않습니다');
@@ -44,7 +66,7 @@ function registerRoute(date, items) {
     return { title: String(it.title || '').slice(0, 100), s, e, location: String(it.location || '').slice(0, 200), placeId: String(it.placeId || '').slice(0, 120) };
   });
   return withLock_(() => {
-    const cal = CalendarApp.getDefaultCalendar();
+    const cal = calendar_();
     routeEventsOn_(cal, date).forEach((ev) => ev.deleteEvent());
     clean.forEach((it) => cal.createEvent(it.title, atMin_(date, it.s), atMin_(date, it.e), {
       location: it.location, description: `${ROUTE_TAG} place:${it.placeId}\n여행 대시보드에서 등록한 동선입니다. 대시보드에서 다시 등록하면 교체됩니다.`,
@@ -53,11 +75,12 @@ function registerRoute(date, items) {
   });
 }
 
-function unregisterRoute(date) {
+function unregisterRoute(date, key) {
+  requireEdit_(key);
   requireConfig_();
   if (!DATE_RE.test(String(date))) fail_('날짜 형식이 올바르지 않습니다');
   return withLock_(() => {
-    routeEventsOn_(CalendarApp.getDefaultCalendar(), date).forEach((ev) => ev.deleteEvent());
+    routeEventsOn_(calendar_(), date).forEach((ev) => ev.deleteEvent());
     return getTripEvents_();
   });
 }

@@ -8,7 +8,8 @@ const SAMPLE_CONFIG = {
   timezone: 'Asia/Tokyo', offset: '+09:00', destKeywords: ['오키나와', '나하', 'OKA'],
   localCurrency: '엔', localSymbol: '¥', homeSymbol: '₩', rate: 9.3,
   payers: ['나', '동행'], methods: ['카드', '현금'], expenseSheet: '여행_지출',
-  arrivalBufferMin: 60, flightLeadMin: 90, defaultStart: '09:00', missing: [], invalid: [], hasMyMaps: true,
+  arrivalBufferMin: 60, flightLeadMin: 90, defaultStart: '09:00', travelMode: 'driving', currencyDecimals: 0, homeDecimals: 0, tileUrl: '',
+  missing: [], invalid: [], hasMyMaps: true,
 };
 
 const sampleHours = (...ranges) => {

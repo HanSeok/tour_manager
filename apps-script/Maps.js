@@ -30,8 +30,10 @@ function travelSheet_() {
 }
 
 
-/** Driving minutes for [{key, from:{lat,lng}, to:{lat,lng}}] → {key: minutes|null}. Cached in a hidden sheet. */
-const TRAVEL_KEY_RE = /^(-?\d{1,3}\.\d{5}),(-?\d{1,3}\.\d{5})>(-?\d{1,3}\.\d{5}),(-?\d{1,3}\.\d{5})(?:@(\d{4}-\d{2}-\d{2})\+(\d{1,4}))?$/;
+/** Travel minutes for [{key, from:{lat,lng}, to:{lat,lng}}] → {key: minutes|null}. Cached in a hidden sheet. */
+const TRAVEL_KEY_RE = /^(-?\d{1,3}\.\d{5}),(-?\d{1,3}\.\d{5})>(-?\d{1,3}\.\d{5}),(-?\d{1,3}\.\d{5})(?:@(\d{4}-\d{2}-\d{2})\+(\d{1,4}))?(?:!([tw]))?$/;
+const MAX_TRAVEL_KEY_LEN = 80;
+const MODE_BY_SUFFIX = { t: 'transit', w: 'walking' }; // no suffix = driving (keeps v1 cache keys valid)
 const TRAFFIC_BUCKET_MIN = 60; // must match prototype/remote.js
 const MAX_DIRECTIONS_PER_DAY = 500; // stays under the Maps service daily quota; protects against URL-holder abuse
 
@@ -39,8 +41,8 @@ const MAX_DIRECTIONS_PER_DAY = 500; // stays under the Maps service daily quota;
 function parseTravelKey_(key, cfg) {
   const m = typeof key === 'string' && key.match(TRAVEL_KEY_RE);
   if (!m) return null;
-  const [, aLat, aLng, bLat, bLng, date, min] = m;
-  const pair = { key, from: { lat: Number(aLat), lng: Number(aLng) }, to: { lat: Number(bLat), lng: Number(bLng) }, depart: null };
+  const [, aLat, aLng, bLat, bLng, date, min, suffix] = m;
+  const pair = { key, from: { lat: Number(aLat), lng: Number(aLng) }, to: { lat: Number(bLat), lng: Number(bLng) }, depart: null, mode: MODE_BY_SUFFIX[suffix] || 'driving' };
   if (date) {
     if (date < cfg.start || date > cfg.end || Number(min) % TRAFFIC_BUCKET_MIN) return null;
     pair.depart = new Date(new Date(`${date}T00:00:00${cfg.offset}`).getTime() + (Number(min) + TRAFFIC_BUCKET_MIN / 2) * 60000).toISOString();
@@ -48,10 +50,25 @@ function parseTravelKey_(key, cfg) {
   return pair;
 }
 
+// ponytail: ≈ 50 km around the My Maps places. A calendar address farther out falls back to the estimate; widen if trips span regions.
+const TRIP_BOX_MARGIN_DEG = 0.5;
+
+/** Bounding box of the trip's My Maps places (cached KML). Anyone with the link can ask for travel times, so random
+ *  coordinates must not burn the shared daily Directions budget. null = no places yet → nothing is looked up. */
+function tripBox_() {
+  const pts = (readMyMaps_().places || []);
+  if (!pts.length) return null;
+  const lats = pts.map((p) => p.lat), lngs = pts.map((p) => p.lng);
+  const m = TRIP_BOX_MARGIN_DEG;
+  return { minLat: Math.min(...lats) - m, maxLat: Math.max(...lats) + m, minLng: Math.min(...lngs) - m, maxLng: Math.max(...lngs) + m };
+}
+const inBox_ = (b, p) => Boolean(b) && p.lat >= b.minLat && p.lat <= b.maxLat && p.lng >= b.minLng && p.lng <= b.maxLng;
+
 /** Counts Directions calls per day in Script Properties; false once the daily cap is reached. */
 function takeDirectionsBudget_(n) {
   const props = PropertiesService.getScriptProperties();
   const key = `quota.directions.${Utilities.formatDate(new Date(), 'UTC', 'yyyy-MM-dd')}`;
+  Object.keys(props.getProperties()).filter((k) => k.startsWith('quota.directions.') && k !== key).forEach((k) => props.deleteProperty(k));
   const used = Number(props.getProperty(key) || 0);
   if (used + n > MAX_DIRECTIONS_PER_DAY) return false;
   props.setProperty(key, String(used + n));
@@ -61,7 +78,8 @@ function takeDirectionsBudget_(n) {
 function getTravelTimes(pairs) {
   const cfg = requireConfig_();
   if (!Array.isArray(pairs) || pairs.length > MAX_TRAVEL_BATCH) fail_('이동시간 요청 형식이 올바르지 않습니다');
-  const valid = pairs.map((p) => parseTravelKey_(p && p.key, cfg)).filter(Boolean);
+  const box = tripBox_();
+  const valid = pairs.map((p) => parseTravelKey_(p && p.key, cfg)).filter((p) => p && inBox_(box, p.from) && inBox_(box, p.to));
   return withLock_(() => {
     const sheet = travelSheet_();
     const n = sheet.getLastRow() - 1;
@@ -70,21 +88,25 @@ function getTravelTimes(pairs) {
     // undefined = transient failure (not cached, retried later); null = no drivable route (cached)
     const missing = valid.filter((p) => !(p.key in known));
     if (missing.length && !takeDirectionsBudget_(missing.length)) fail_('오늘 이동시간 조회 한도를 넘었습니다. 내일 다시 시도하세요');
-    const fresh = missing.map((p) => [p.key, drivingMinutes_(p.from, p.to, p.depart), now])
+    const fresh = missing.map((p) => [p.key, travelMinutes_(p.from, p.to, p.depart, p.mode), now])
       .filter((r) => r[1] !== undefined);
     if (fresh.length) sheet.getRange(sheet.getLastRow() + 1, 1, fresh.length, 3).setValues(fresh.map((r) => [r[0], r[1] == null ? '' : r[1], r[2]]));
     const all = { ...known, ...Object.fromEntries(fresh.map((r) => [r[0], r[1]])) };
-    return Object.fromEntries(valid.map((p) => [p.key, all[p.key] == null ? null : all[p.key]]));
+    // every requested key gets an answer (null = estimate): an omitted key would be re-requested by the page forever
+    const asked = pairs.map((p) => p && p.key).filter((k) => typeof k === 'string' && k.length <= MAX_TRAVEL_KEY_LEN);
+    return Object.fromEntries(asked.map((k) => [k, all[k] == null ? null : all[k]]));
   });
 }
 
-/** Driving minutes; with a future `depart` (ISO) the traffic-aware duration_in_traffic is used (built-in, free). */
-function drivingMinutes_(from, to, depart) {
+const DIRECTIONS_MODE = { driving: 'DRIVING', transit: 'TRANSIT', walking: 'WALKING' };
+
+/** Travel minutes; a future `depart` (ISO) gives traffic-aware driving / timetable-aware transit (built-in, free). */
+function travelMinutes_(from, to, depart, mode) {
   try {
     const finder = Maps.newDirectionFinder()
       .setOrigin(Number(from.lat), Number(from.lng))
       .setDestination(Number(to.lat), Number(to.lng))
-      .setMode(Maps.DirectionFinder.Mode.DRIVING);
+      .setMode(Maps.DirectionFinder.Mode[DIRECTIONS_MODE[mode] || 'DRIVING']);
     const when = depart ? new Date(depart) : null;
     if (when && !Number.isNaN(when.getTime()) && when.getTime() > Date.now()) finder.setDepart(when);
     const res = finder.getDirections();

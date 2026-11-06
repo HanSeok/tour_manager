@@ -1,5 +1,5 @@
 // Opening-hours parsers → {weekday(0=Sun): [[openMin, closeMin]]} (close past midnight → +1440), null = unknown.
-// Same rules as import/csv_to_places.py (Korean Google Maps text) + Places API (New) regularOpeningHours.periods.
+// Sources: Korean Google Maps hours text (영업시간 column of an imported My Maps CSV) + Places API (New) regularOpeningHours.periods.
 (function (root) {
   const DAYS = { 일: 0, 월: 1, 화: 2, 수: 3, 목: 4, 금: 5, 토: 6 };
   const TIME = /(?:(오전|오후)\s*)?(\d{1,2}):(\d{2})/g;

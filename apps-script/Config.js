@@ -16,12 +16,12 @@ const CONFIG_FIELDS = [
   ['start', '시작일', true, '', 'YYYY-MM-DD. 예: 2027-04-10'],
   ['end', '종료일', true, '', 'YYYY-MM-DD. 예: 2027-04-14'],
   ['timezone', '현지 시간대', true, '', 'IANA 시간대. 예: Asia/Tokyo, Asia/Bangkok, Europe/Paris, America/Los_Angeles'],
-  ['destKeywords', '목적지 키워드', true, '', '쉼표로 구분. 항공편 일정 제목의 → 오른쪽에 있으면 도착편, 왼쪽이면 출국편. 예: 오키나와, 나하, OKA'],
+  ['destKeywords', '목적지 키워드', true, '', '쉼표로 구분. 항공편 일정 제목의 → 오른쪽에 있으면 도착편, 왼쪽이면 출국편. Gmail 자동 일정(Flight to Naha)도 인식하도록 영문 지명도 넣으세요. 예: 오키나와, 나하, Naha, OKA'],
   ['myMapsUrl', 'My Maps 링크', true, '', 'My Maps 지도 주소 (공유: 링크가 있는 모든 사용자 보기)'],
   ['localCurrency', '현지 통화 이름', true, '', '예: 엔, 바트, 유로'],
   ['localSymbol', '현지 통화 기호', true, '', '예: ¥, ฿, €'],
   ['homeSymbol', '환산 통화 기호', true, '₩', '합계를 환산해 보여줄 통화 기호'],
-  ['rate', '환율', true, '', '현지 통화 1 = 환산 통화 얼마. 예: 9.3'],
+  ['rate', '환율', true, '', '현지 통화 1 = 환산 통화 얼마. 예: 9.3 또는 =GOOGLEFINANCE("CURRENCY:JPYKRW") (자동)'],
   ['payers', '결제자', true, '나, 배우자', '쉼표로 구분'],
   ['methods', '결제수단', true, '카드, 현금', '쉼표로 구분'],
   ['expenseSheet', '지출 시트 이름', true, '여행_지출', '이 이름의 탭에 지출이 기록됩니다 (없으면 자동 생성)'],
@@ -29,8 +29,16 @@ const CONFIG_FIELDS = [
   ['arrivalBufferMin', '입국 소요(분)', false, '60', '도착편 착륙 후 출발까지 걸리는 시간'],
   ['flightLeadMin', '출국편 공항 도착(분 전)', false, '90', '출국편 출발 몇 분 전까지 공항에 도착할지'],
   ['defaultStart', '기본 출발 시각', false, '09:00', '숙소에서 출발하는 날의 기본 시각 (HH:MM)'],
+  ['travelMode', '이동수단', false, '자동차', '자동차 / 대중교통 / 도보 중 하나. 이동시간과 길찾기 링크에 쓰입니다'],
+  ['currencyDecimals', '현지 통화 소수 자릿수', false, '0', '0~2. 유로·달러처럼 센트가 있으면 2'],
+  ['homeDecimals', '환산 통화 소수 자릿수', false, '0', '0~2. 원화는 0, 달러는 2'],
+  ['calendarId', '캘린더 ID', false, '', '비우면 기본 캘린더. 메뉴 [여행 대시보드 → 여행 전용 캘린더 만들기]를 권장 (개인 일정이 노출되지 않음)'],
+  ['tileUrl', '지도 타일 주소', false, '', '비우면 OpenStreetMap. 예: https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?api_key=키'],
 ];
+const TRAVEL_MODES = { 자동차: 'driving', 대중교통: 'transit', 도보: 'walking' };
+const RATE_LABEL = '환율';
 
+const isTileUrl_ = (u) => /^https:\/\/[^\s"'<>`]+$/.test(String(u || '')) && ['{z}', '{x}', '{y}'].every((t) => String(u).includes(t));
 const splitList_ = (s) => String(s || '').split(/[,，]/).map((x) => x.trim()).filter(Boolean);
 const toInt_ = (s, fallback) => (String(s).trim() === '' || !Number.isFinite(Number(s)) ? fallback : Math.round(Number(s)));
 // Sheets may auto-convert typed dates/times into Date objects → back to the text the user meant.
@@ -83,6 +91,13 @@ function validateConfig_(raw, hasSheet) {
     const v = Number(raw[key]);
     if (String(raw[key]).trim() !== '' && !(Number.isFinite(v) && v >= 0 && v <= MAX_BUFFER_MIN)) bad(label, `0~${MAX_BUFFER_MIN} 사이의 숫자여야 합니다`);
   });
+  if (raw.travelMode && !TRAVEL_MODES[raw.travelMode]) bad('이동수단', `${Object.keys(TRAVEL_MODES).join(' / ')} 중 하나여야 합니다`);
+  [['currencyDecimals', '현지 통화 소수 자릿수'], ['homeDecimals', '환산 통화 소수 자릿수']].forEach(([key, label]) => {
+    if (String(raw[key] || '').trim() !== '' && !/^[0-2]$/.test(String(raw[key]).trim())) bad(label, '0, 1, 2 중 하나여야 합니다');
+  });
+  const decimalsOf = (key) => Math.min(2, Math.max(0, toInt_(raw[key], 0)));
+  if (raw.calendarId && (/\s/.test(raw.calendarId) || raw.calendarId.length > 200)) bad('캘린더 ID', '공백 없는 캘린더 ID여야 합니다 (캘린더 설정 → 캘린더 통합)');
+  if (raw.tileUrl && !isTileUrl_(raw.tileUrl)) bad('지도 타일 주소', 'https:// 로 시작하고 {z} {x} {y} 가 들어 있어야 합니다');
   const defaultStart = TIME_RE.test(raw.defaultStart) ? normTime_(raw.defaultStart) : '09:00';
   return {
     title: raw.title, subtitle: raw.subtitle, start: raw.start, end: raw.end, days,
@@ -93,6 +108,11 @@ function validateConfig_(raw, hasSheet) {
     payers: splitList_(raw.payers), methods: splitList_(raw.methods), expenseSheet: raw.expenseSheet,
     arrivalBufferMin: toInt_(raw.arrivalBufferMin, 60), flightLeadMin: toInt_(raw.flightLeadMin, 90),
     defaultStart,
+    travelMode: TRAVEL_MODES[raw.travelMode] || 'driving',
+    currencyDecimals: decimalsOf('currencyDecimals'),
+    homeDecimals: decimalsOf('homeDecimals'),
+    calendarId: raw.calendarId || '',
+    tileUrl: isTileUrl_(raw.tileUrl) ? raw.tileUrl : '',
     missing, invalid,
   };
 }
@@ -101,7 +121,7 @@ const isConfigured_ = (cfg) => !cfg.missing.length && !cfg.invalid.length;
 
 /** Client-safe subset (no secrets live in config anyway). */
 function publicConfig_(cfg) {
-  const { mid, ...rest } = cfg;
+  const { mid, calendarId, ...rest } = cfg;
   return { ...rest, hasMyMaps: Boolean(mid) };
 }
 
@@ -110,11 +130,15 @@ function publicConfig_(cfg) {
 function onOpen() {
   SpreadsheetApp.getUi().createMenu('여행 대시보드')
     .addItem('설정·안내 탭 만들기', 'setup')
+    .addItem('여행 전용 캘린더 만들기', 'createTripCalendar')
+    .addItem('보기·편집 링크 보기', 'showEditLinks')
+    .addItem('편집 키 새로 만들기 (이전 편집 링크 무효)', 'rotateEditKey')
     .addToUi();
 }
 
 /** Menu / editor entry point. Takes no values: web users can call any public function. */
 function setup() {
+  SpreadsheetApp.getUi(); // throws for web callers (google.script.run) before anything is created
   return setup_({});
 }
 
@@ -128,6 +152,8 @@ function setup_(values) {
     const rows = CONFIG_FIELDS.map(([key, label, required, def, desc]) => [label, preset[key] !== undefined ? preset[key] : def, `${required ? '[필수] ' : '[선택] '}${desc}`]);
     sheet.getRange(1, 1, 1, 3).setValues([['항목', '값', '설명']]).setFontWeight('bold');
     sheet.getRange(2, 2, rows.length, 1).setNumberFormat('@').setBackground('#fff8e1'); // text before values: no formulas
+    const rateRow = CONFIG_FIELDS.findIndex(([, label]) => label === RATE_LABEL) + 2;
+    sheet.getRange(rateRow, 2).setNumberFormat('0.####'); // owner-only cell: a GOOGLEFINANCE formula must evaluate
     sheet.getRange(2, 1, rows.length, 3).setValues(rows);
     sheet.setFrozenRows(1);
     sheet.setColumnWidth(1, 170);
@@ -148,7 +174,9 @@ function writeGuide_(sheet) {
     ['   · 다음 사용자 인증 정보로 실행: 나 / 액세스 권한: Google 계정이 있는 모든 사용자 → [배포]'],
     ['   · 권한 검토 → 계정 선택 → 고급 → (안전하지 않음)으로 이동 → 허용  (직접 만든 스크립트라 뜨는 경고입니다)'],
     ['3. 배포 후 나오는 웹 앱 URL이 대시보드 주소입니다. 같이 여행하는 사람에게 이 주소만 보내면 됩니다.'],
-    ['   · 주의: 주소를 아는 Google 로그인 사용자는 누구나 일정·지출을 보고 쓸 수 있습니다.'],
+    ['   · 주의: 주소를 아는 Google 로그인 사용자는 누구나 일정·지출을 볼 수 있습니다.'],
+    ['   · 편집을 제한하려면 메뉴 [여행 대시보드 → 보기·편집 링크 보기]: 보기 링크로는 바꿀 수 없고, 편집 링크(?k=…)만 지출·동선을 바꿉니다.'],
+    ['   · 개인 일정을 숨기려면 메뉴 [여행 대시보드 → 여행 전용 캘린더 만들기] 후 항공·숙박·예약 일정을 그 캘린더에 넣으세요.'],
     ['4. 장소: My Maps(mymaps.google.com)에 지도를 만들고 장소를 추가 → 공유: 링크가 있는 모든 사용자 보기 → 설정의 [My Maps 링크]에 주소 입력'],
     ['5. 캘린더(기본 캘린더) 일정 규칙'],
     ['   · 항공편: 제목에 화살표 → 를 넣고 도착지/출발지에 [목적지 키워드]를 씁니다. 예: "KE741 인천 → 오키나와(나하)"'],

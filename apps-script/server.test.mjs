@@ -6,17 +6,26 @@ import fs from 'node:fs';
 import vm from 'node:vm';
 
 const dir = new URL('.', import.meta.url).pathname;
+// In-memory Script Properties + no-op lock: lets saveState / requireEdit_ run for real.
+const props = new Map();
+const scriptProps = {
+  getProperty: (k) => (props.has(k) ? props.get(k) : null),
+  setProperty: (k, v) => { props.set(k, String(v)); },
+  setProperties: (o) => { Object.entries(o).forEach(([k, v]) => props.set(k, String(v))); },
+  deleteProperty: (k) => { props.delete(k); },
+  getProperties: () => Object.fromEntries(props),
+};
 const ctx = {
   console,
   Intl,
   Utilities: { formatDate: () => '+09:00' },
   SpreadsheetApp: {},
-  PropertiesService: {},
-  LockService: {},
+  PropertiesService: { getScriptProperties: () => scriptProps },
+  LockService: { getScriptLock: () => ({ waitLock() {}, releaseLock() {} }) },
   HtmlService: {},
 };
 vm.createContext(ctx);
-for (const f of ['Config.js', 'Code.js', 'Maps.js']) vm.runInContext(fs.readFileSync(dir + f, 'utf8'), ctx, { filename: f });
+for (const f of ['Config.js', 'Code.js', 'Maps.js', 'Admin.js', 'Expenses.js', 'Calendar.js']) vm.runInContext(fs.readFileSync(dir + f, 'utf8'), ctx, { filename: f });
 const run = (expr) => vm.runInContext(expr, ctx);
 
 test('safeCell_ neutralizes formulas, keeps normal text/numbers', () => {
@@ -78,4 +87,121 @@ test('route tag must start the description (user events mentioning it are not de
   assert.ok(run(`ROUTE_TAG_RE.test('#trip-route place:x')`));
   assert.ok(run(`ROUTE_TAG_RE.test('#okinawa-route place:x')`));
   assert.ok(!run(`ROUTE_TAG_RE.test('메모: #trip-route 참고')`));
+});
+
+test('new config fields: travel mode, decimals, calendar id, tile url', () => {
+  const base = {
+    title: 't', start: '2027-04-10', end: '2027-04-14', timezone: 'Asia/Tokyo', destKeywords: '나하', myMapsUrl: 'https://x/?mid=abc',
+    localCurrency: '유로', localSymbol: '€', homeSymbol: '₩', rate: '1450', payers: '나', methods: '카드', expenseSheet: '지출',
+    arrivalBufferMin: '', flightLeadMin: '', defaultStart: '',
+  };
+  ctx.raw = { ...base, travelMode: '대중교통', currencyDecimals: '2', calendarId: 'abc@group.calendar.google.com', tileUrl: 'https://{s}.tile.example/{z}/{x}/{y}.png' };
+  const good = run('validateConfig_(raw, true)');
+  assert.strictEqual(good.invalid.join('|'), '');
+  assert.strictEqual([good.travelMode, good.currencyDecimals, good.calendarId].join('|'), 'transit|2|abc@group.calendar.google.com');
+  ctx.raw = base; // optional fields empty → defaults
+  const dflt = run('validateConfig_(raw, true)');
+  assert.strictEqual([dflt.travelMode, dflt.currencyDecimals, dflt.tileUrl, dflt.invalid.length].join('|'), 'driving|0||0');
+  ctx.raw = { ...base, travelMode: '비행기', currencyDecimals: '3', calendarId: 'a b', tileUrl: 'javascript:alert(1)/{z}/{x}/{y}' };
+  const text = run('validateConfig_(raw, true)').invalid.join('\n');
+  for (const label of ['이동수단', '소수 자릿수', '캘린더 ID', '지도 타일 주소']) assert.ok(text.includes(label), label);
+  ctx.c = good;
+  assert.strictEqual(run('JSON.stringify(Object.keys(publicConfig_(c)).filter((k) => k === "calendarId" || k === "mid"))'), '[]');
+});
+
+test('requireEdit_: open without a key, exact match required with one', () => {
+  props.clear();
+  assert.doesNotThrow(() => run(`requireEdit_(undefined)`));
+  props.set('EDIT_KEY', 'a'.repeat(32));
+  assert.throws(() => run(`requireEdit_('')`), /보기 전용/);
+  assert.throws(() => run(`requireEdit_('${'b'.repeat(32)}')`), /보기 전용/);
+  assert.doesNotThrow(() => run(`requireEdit_('${'a'.repeat(32)}')`));
+  props.set('EDIT_KEY', 'not-hex'); // a malformed stored key is ignored, not echoed or matched
+  assert.strictEqual(run('editKey_()'), '');
+  props.clear();
+});
+
+const TRIP_CFG = { start: '2027-04-10', end: '2027-04-14', missing: [], invalid: [] };
+
+test('saveState merges per-date patches (two companions, different days) and migrates legacy routes', () => {
+  props.clear();
+  ctx.tc = TRIP_CFG;
+  run('configMemo_ = tc');
+  props.set('state.routes', JSON.stringify({ '2027-04-10': [{ id: 'old', stayMin: 30 }] }));
+  run(`saveState('routes', { '2027-04-11': [{ id: 'a', stayMin: 60 }] })`); // companion A
+  run(`saveState('routes', { '2027-04-12': [{ id: 'b', stayMin: 90 }] })`); // companion B
+  const routes = run('readState_().routes');
+  assert.deepStrictEqual(Object.keys(routes).sort(), ['2027-04-10', '2027-04-11', '2027-04-12']);
+  assert.ok(!props.has('state.routes'), 'legacy key removed after migration');
+  run(`saveState('routes', { '2027-04-11': null })`);
+  assert.ok(!props.has('state.routes.2027-04-11') && props.has('state.routes.2027-04-12'), 'null patch deletes only that day');
+  run(`saveState('eventPlace', { e1: 'p1' })`);
+  run(`saveState('eventPlace', { e2: '' })`);
+  assert.deepStrictEqual({ ...run('readState_().eventPlace') }, { e1: 'p1', e2: '' });
+  assert.throws(() => run(`saveState('routes', { 'not-a-date': [] })`), /형식/);
+  assert.throws(() => run(`saveState('routes', [1])`), /형식/);
+  assert.throws(() => run(`saveState('routes', { '2031-01-01': [] })`), /여행 기간/); // bounds per-date property growth
+  assert.throws(() => run(`saveState('starts', { '2027-04-09': 600 })`), /여행 기간/);
+  props.set('EDIT_KEY', 'c'.repeat(32));
+  assert.throws(() => run(`saveState('starts', { '2027-04-10': 600 }, 'wrong')`), /보기 전용/);
+  props.clear();
+});
+
+test('cleanExpense_: decimals, pre-trip dates, home-currency input', () => {
+  ctx.cfg = { start: '2027-04-10', end: '2027-04-14', currencyDecimals: 2, homeDecimals: 0, rate: 1450, payers: ['나'], methods: ['카드'], localCurrency: '유로', homeSymbol: '₩' };
+  const e = { date: '2027-04-11', category: '식비', payer: '나', method: '카드', item: '' };
+  ctx.e = { ...e, amount: 4.5 };
+  const c = run('cleanExpense_(cfg, e)');
+  assert.strictEqual([c.amount, c.home, c.item, c.currency].join('|'), '4.5|6525|식비|유로');
+  ctx.e = { ...e, amount: 1.1 }; // float: 1.1 * 100 !== 110
+  assert.strictEqual(run('cleanExpense_(cfg, e)').amount, 1.1);
+  ctx.e = { ...e, amount: ['2027-04-11'] };
+  assert.throws(() => run('cleanExpense_(cfg, e)'), /금액/);
+  ctx.e = { ...e, amount: 1, date: ['2027-04-11'] }; // stored date is the coerced string, never the raw array
+  assert.strictEqual(typeof run('cleanExpense_(cfg, e)').date, 'string');
+  ctx.e = { ...e, amount: 4.555 };
+  assert.throws(() => run('cleanExpense_(cfg, e)'), /소수 2자리/);
+  ctx.e = { ...e, amount: 290000, currency: 'home', date: '2026-12-01' }; // pre-paid flight in ₩
+  const h = run('cleanExpense_(cfg, e)');
+  assert.strictEqual([h.amount, h.home, h.currency].join('|'), '200|290000|₩');
+  for (const date of ['2026-04-09', '2027-04-15', '2027-02-30']) {
+    ctx.e = { ...e, amount: 1, date };
+    assert.throws(() => run('cleanExpense_(cfg, e)'), /날짜/, date);
+  }
+  ctx.cfg = { ...ctx.cfg, currencyDecimals: 0 };
+  ctx.e = { ...e, amount: 1.5 };
+  assert.throws(() => run('cleanExpense_(cfg, e)'), /정수/);
+  ctx.e = { ...e, amount: 290000.5, currency: 'home' }; // ₩ has no decimals (homeDecimals 0)
+  assert.throws(() => run('cleanExpense_(cfg, e)'), /정수/);
+  ctx.cfg = { ...ctx.cfg, homeSymbol: '$', homeDecimals: 2, rate: 0.0067 }; // ¥ trip, USD home: cents kept
+  ctx.e = { ...e, amount: 1500 };
+  assert.strictEqual(run('cleanExpense_(cfg, e)').home, 10.05);
+  ctx.e = { ...e, amount: 1, payer: '모르는 사람' };
+  assert.throws(() => run('cleanExpense_(cfg, e)'), /결제자/);
+});
+
+test('travel key mode suffix', () => {
+  ctx.cfg = { start: '2027-04-10', end: '2027-04-14', offset: '+09:00' };
+  const k = '26.20600,127.64660>26.31460,127.75680';
+  assert.strictEqual(run(`parseTravelKey_('${k}', cfg).mode`), 'driving');
+  assert.strictEqual(run(`parseTravelKey_('${k}!t', cfg).mode`), 'transit');
+  assert.strictEqual(run(`parseTravelKey_('${k}@2027-04-10+900!w', cfg).mode`), 'walking');
+  assert.strictEqual(run(`parseTravelKey_('${k}!x', cfg)`), null);
+});
+
+test('VERSION matches the repo VERSION file; stay titles', () => {
+  assert.strictEqual(run('VERSION'), fs.readFileSync(`${dir}../VERSION`, 'utf8').trim());
+  for (const t of ['Stay at Hotel Moon', '샘플 호텔 숙박', 'Hilton Hotel']) assert.ok(run('STAY_TITLE_RE').test(t), t);
+  assert.ok(!run('STAY_TITLE_RE').test('오키나와 여행'));
+});
+
+test('unescapeCell_ undoes safeCell_ for display only', () => {
+  for (const v of ['=IMAGE("x")', '-', '+5 coffee', '소바']) assert.strictEqual(run(`unescapeCell_(safeCell_(${JSON.stringify(v)}))`), v);
+});
+
+test('inBox_: travel lookups only near the trip', () => {
+  ctx.b = { minLat: 25.7, maxLat: 27.2, minLng: 127.1, maxLng: 128.5 };
+  assert.ok(run('inBox_(b, { lat: 26.2, lng: 127.7 })'));
+  assert.ok(!run('inBox_(b, { lat: 37.5, lng: 127.0 })'));
+  assert.ok(!run('inBox_(null, { lat: 26.2, lng: 127.7 })'));
 });

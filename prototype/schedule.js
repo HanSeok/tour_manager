@@ -14,8 +14,14 @@
     settings = { arrivalBufferMin, flightLeadMin, defaultStartMin: toMin(defaultStart), dest: words.length ? new RegExp(words.join('|'), 'i') : /(?!)/ };
   }
 
+  // Gmail-created flight events ("Flight to Naha (NH 123)"). ponytail: exact Gmail title formats are unverified — extend this list.
+  const FLIGHT_TO_RE = /^(?:flight to|항공편[:：]|비행편[:：])\s*(.+)$/i;
+  const isFlightTitle = (title) => /→|->/.test(title) || FLIGHT_TO_RE.test(title);
+
   function kindOf(ev) {
     if (ev.kind === 'route') return 'route';
+    const to = ev.title.match(FLIGHT_TO_RE);
+    if (to) return settings.dest.test(to[1]) ? 'flightIn' : 'flightOut';
     const sides = ev.title.split(/→|->/);
     if (sides.length === 2 && settings.dest.test(sides[1])) return 'flightIn';   // "인천 → 오키나와(나하)"
     if (sides.length === 2 && settings.dest.test(sides[0])) return 'flightOut';
@@ -68,7 +74,7 @@
   function expandEvents(raw) {
     return raw.flatMap((e) => {
       const base = { location: e.location || '', lat: e.lat, lng: e.lng, placeId: e.placeId, ...(e.kind ? { kind: e.kind } : {}) };
-      const isFlight = /→|->/.test(e.title);
+      const isFlight = isFlightTitle(e.title);
       if (e.endDate && e.endDate !== e.startDate && !isFlight) {
         return [
           { ...base, id: `${e.id}:in`, date: e.startDate, start: e.start, end: null, title: `체크인 · ${e.title}` },

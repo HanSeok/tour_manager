@@ -45,7 +45,7 @@ def build_xlsx(spec):
         c.font = Font(bold=True)
     for key, label, required, default, desc in spec['fields']:
         ws.append([label, default, f"{'[필수] ' if required else '[선택] '}{desc}"])
-        ws.cell(ws.max_row, 2).number_format = '@'
+        ws.cell(ws.max_row, 2).number_format = '0.####' if label == '환율' else '@'  # 환율 may be a GOOGLEFINANCE formula
         ws.cell(ws.max_row, 2).fill = PatternFill('solid', fgColor='FFF8E1')
     ws.column_dimensions['A'].width = 24
     ws.column_dimensions['B'].width = 36

@@ -2,8 +2,8 @@
 // hours: {weekday(0=Sun): [[open, close], ...]} | null(unknown). [] = closed that day.
 // ponytail: closing past midnight (e.g. 02:00) not modeled; add when a late-night bar is planned.
 (function (root) {
-  const ROAD_FACTOR = 1.4; // straight line → road distance
-  const AVG_KMH = 38;      // Okinawa local roads, mock only (real = Directions API)
+  // Fallback estimate while the real time (Directions) is loading or unavailable: straight line × detour factor ÷ speed.
+  const ESTIMATE = { driving: { factor: 1.4, kmh: 35 }, transit: { factor: 1.3, kmh: 18 }, walking: { factor: 1.3, kmh: 4.5 } };
 
   function haversineKm(a, b) {
     const R = 6371, rad = (d) => (d * Math.PI) / 180;
@@ -12,8 +12,25 @@
     return 2 * R * Math.asin(Math.sqrt(x));
   }
 
-  function mockTravelMin(a, b) {
-    return Math.max(3, Math.round(((haversineKm(a, b) * ROAD_FACTOR) / AVG_KMH) * 60));
+  const MAX_SWAP_ROUNDS = 20; // ≤ 15 stops: converges in a few rounds
+
+  function mockTravelMin(a, b, mode = 'driving') {
+    const { factor, kmh } = ESTIMATE[mode] || ESTIMATE.driving;
+    return Math.max(3, Math.round(((haversineKm(a, b) * factor) / kmh) * 60));
+  }
+
+  /** Nearest-neighbour visiting order from `start` → indices into `stops`. ponytail: greedy, not optimal; fine for ≤ 15 stops. */
+  function nearestOrder(start, stops) {
+    const left = stops.map((s, i) => i);
+    const order = [];
+    let at = start;
+    while (left.length) {
+      const k = left.reduce((best, i, n) => (haversineKm(at, stops[i]) < haversineKm(at, stops[left[best]]) ? n : best), 0);
+      const [i] = left.splice(k, 1);
+      order.push(i);
+      at = stops[i];
+    }
+    return order;
   }
 
   // Calendar-fixed stop: fixed = {start, end|null, due}. Early → wait until start; after due → LATE.
@@ -60,7 +77,30 @@
     return { legs, endMin: t, travelTotal };
   }
 
-  const api = { haversineKm, mockTravelMin, planRoute };
+  const pathKm = (start, pts) => pts.reduce((acc, p, i) => acc + haversineKm(i ? pts[i - 1] : start, p), 0);
+
+  /** Shorter visiting order for `pts` (fixed[i] = calendar item that keeps its slot) → index order.
+   *  Never longer than the current order: best of (current, nearest-neighbour), then pairwise swaps while they help. */
+  function sortStops(start, pts, fixed = []) {
+    const slots = pts.map((p, i) => i).filter((i) => !fixed[i]);
+    const fill = (perm) => { let k = 0; return pts.map((p, i) => (fixed[i] ? i : perm[k++])); };
+    const km = (order) => pathKm(start, order.map((i) => pts[i]));
+    const nn = fill(nearestOrder(start, slots.map((i) => pts[i])).map((k) => slots[k]));
+    let best = km(nn) < km(pts.map((p, i) => i)) ? nn : pts.map((p, i) => i);
+    let improved = true;
+    for (let round = 0; improved && round < MAX_SWAP_ROUNDS; round += 1) {
+      improved = false;
+      for (let a = 0; a < slots.length; a += 1) {
+        for (let b = a + 1; b < slots.length; b += 1) {
+          const next = best.map((v, i) => (i === slots[a] ? best[slots[b]] : i === slots[b] ? best[slots[a]] : v));
+          if (km(next) < km(best) - 1e-9) { best = next; improved = true; }
+        }
+      }
+    }
+    return best;
+  }
+
+  const api = { haversineKm, mockTravelMin, nearestOrder, sortStops, planRoute };
   if (typeof module !== 'undefined') module.exports = api;
   else root.Route = api;
 })(typeof window !== 'undefined' ? window : globalThis);

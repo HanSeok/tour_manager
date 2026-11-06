@@ -29,6 +29,8 @@ def main():
     for f in stale:  # e.g. an old bundle that is no longer referenced (clasp push would upload it)
         f.unlink()
     out = LOCAL_SCRIPT.sub(lambda m: f"<?!= include('js_{m.group(1)}') ?>", index)
+    # Edit access from doGet (hex key or ''), before any app script. Prototype mode has no such line → editable.
+    out = out.replace('<head>', '<head>\n<script>window.EDIT_ACCESS = <?!= editAccess ?>;</script>', 1)
     (ROOT / 'index.html').write_text(out, encoding='utf-8')
     print(f'built index.html + {len(names)} scripts: {", ".join(names)}')
 
