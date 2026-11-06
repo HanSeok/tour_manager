@@ -1,6 +1,7 @@
 // Trip settings live in the "설정" tab (항목 | 값 | 설명). Everything trip-specific comes from here.
 const CONFIG_SHEET = '설정';
 const GUIDE_SHEET = '안내';
+const GUIDE_TITLE = '여행 대시보드 사용법';
 const MAX_TRIP_DAYS = 31;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const TIME_RE = /^([01]?\d|2[0-3]):[0-5]\d$/; // "9:00" is fine (typed or sheet-converted)
@@ -134,6 +135,42 @@ function onOpen() {
     .addItem('보기·편집 링크 보기', 'showEditLinks')
     .addItem('편집 키 새로 만들기 (이전 편집 링크 무효)', 'rotateEditKey')
     .addToUi();
+  // Upgrades (v1 sheet, an older template copy): new setting rows + current guide text. Never blocks the menu.
+  try { upgradeTabs_(SpreadsheetApp.getActive()); } catch (err) { console.warn(`upgrade skipped: ${err}`); }
+}
+
+const configRow_ = ([, label, required, def, desc]) => [label, def, `${required ? '[필수] ' : '[선택] '}${desc}`];
+
+/** Appends settings rows the 설정 tab doesn't have yet (existing values are never touched). → number of rows added */
+function addMissingConfigRows_(sheet) {
+  const have = new Set(sheet.getRange(1, 1, Math.max(sheet.getLastRow(), 1), 1).getValues().map((r) => String(r[0]).trim()));
+  const rows = CONFIG_FIELDS.filter(([, label]) => !have.has(label)).map(configRow_);
+  if (!rows.length) return 0;
+  const first = sheet.getLastRow() + 1;
+  sheet.getRange(first, 2, rows.length, 1).setNumberFormat('@').setBackground('#fff8e1'); // text before values: no formulas
+  sheet.getRange(first, 1, rows.length, 3).setValues(rows);
+  return rows.length;
+}
+
+function guideLines_() {
+  const lines = [];
+  writeGuide_({ getRange: () => ({ setValues: (v) => lines.push(...v), setFontWeight: () => {} }), setColumnWidth: () => {} });
+  return lines.map((r) => r[0]);
+}
+
+/** 설정: add missing rows. 안내: rewrite when its text differs from this version's guide (the tab is ours, not user data). */
+function upgradeTabs_(ss) {
+  const config = ss.getSheetByName(CONFIG_SHEET);
+  const added = config ? addMissingConfigRows_(config) : 0;
+  const guide = ss.getSheetByName(GUIDE_SHEET);
+  if (guide) {
+    const want = guideLines_();
+    const now = guide.getRange(1, 1, Math.max(guide.getLastRow(), 1), 1).getValues().map((r) => String(r[0]));
+    const isOurs = now[0].startsWith(GUIDE_TITLE); // a user's own tab named 안내 is never cleared
+    if (isOurs && now.join('\n') !== want.join('\n')) { guide.clear(); writeGuide_(guide); }
+  }
+  configMemo_ = null;
+  return added;
 }
 
 /** Menu / editor entry point. Takes no values: web users can call any public function. */
@@ -149,7 +186,7 @@ function setup_(values) {
   if (!sheet) {
     sheet = ss.insertSheet(CONFIG_SHEET, 0);
     const preset = values || {};
-    const rows = CONFIG_FIELDS.map(([key, label, required, def, desc]) => [label, preset[key] !== undefined ? preset[key] : def, `${required ? '[필수] ' : '[선택] '}${desc}`]);
+    const rows = CONFIG_FIELDS.map((f) => { const r = configRow_(f); return preset[f[0]] !== undefined ? [r[0], preset[f[0]], r[2]] : r; });
     sheet.getRange(1, 1, 1, 3).setValues([['항목', '값', '설명']]).setFontWeight('bold');
     sheet.getRange(2, 2, rows.length, 1).setNumberFormat('@').setBackground('#fff8e1'); // text before values: no formulas
     const rateRow = CONFIG_FIELDS.findIndex(([, label]) => label === RATE_LABEL) + 2;
@@ -161,7 +198,7 @@ function setup_(values) {
     sheet.setColumnWidth(3, 520);
   }
   if (!ss.getSheetByName(GUIDE_SHEET)) writeGuide_(ss.insertSheet(GUIDE_SHEET, 1));
-  configMemo_ = null;
+  upgradeTabs_(ss); // an existing (older) 설정 tab gets the new rows too
   return { created: true };
 }
 

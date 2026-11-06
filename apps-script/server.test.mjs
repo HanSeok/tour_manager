@@ -205,3 +205,39 @@ test('inBox_: travel lookups only near the trip', () => {
   assert.ok(!run('inBox_(b, { lat: 37.5, lng: 127.0 })'));
   assert.ok(!run('inBox_(null, { lat: 26.2, lng: 127.7 })'));
 });
+
+test('upgradeTabs_: appends only missing setting rows, keeps values, refreshes a stale guide', () => {
+  const grid = (rows) => {
+    let data = rows.map((r) => [...r]);
+    const formats = [];
+    return {
+      data: () => data, formats,
+      getLastRow: () => data.length,
+      clear: () => { data = []; },
+      setColumnWidth: () => {},
+      getRange: (row, col, nRows = 1, nCols = 1) => ({
+        getValues: () => Array.from({ length: nRows }, (_, i) => Array.from({ length: nCols }, (_, j) => ((data[row - 1 + i] || [])[col - 1 + j] ?? ''))),
+        setValues: (v) => { v.forEach((r, i) => { data[row - 1 + i] = [...(data[row - 1 + i] || []), '', '', ''].slice(0, Math.max(3, col - 1)); r.forEach((x, j) => { data[row - 1 + i][col - 1 + j] = x; }); }); return { setFontWeight() {} }; },
+        setNumberFormat: (f) => { formats.push([row, f]); return { setBackground() {} }; },
+        setFontWeight: () => {},
+      }),
+    };
+  };
+  const v1Labels = run('CONFIG_FIELDS').slice(0, 17).map((f) => [f[1], `값-${f[0]}`, '']); // a v1 tab (17 rows) with values
+  const config = grid([['항목', '값', '설명'], ...v1Labels]);
+  const guide = grid([['여행 대시보드 사용법 (옛 버전)']]);
+  ctx.ss = { getSheetByName: (n) => (n === '설정' ? config : n === '안내' ? guide : null) };
+  const added = run('upgradeTabs_(ss)');
+  const total = run('CONFIG_FIELDS.length');
+  assert.strictEqual(added, total - 17);
+  assert.strictEqual(config.data().length, total + 1);
+  assert.strictEqual(config.data()[1][1], '값-title', 'existing value untouched');
+  assert.strictEqual(config.data().slice(18).map((r) => r[0]).join('|'), run('CONFIG_FIELDS').slice(17).map((f) => f[1]).join('|'));
+  assert.ok(config.formats.every(([, f]) => f === '@'), 'new value cells are text (no formulas)');
+  assert.strictEqual(guide.data()[0][0], run('guideLines_()')[0], 'stale guide rewritten');
+  assert.strictEqual(run('upgradeTabs_(ss)'), 0, 'second run adds nothing');
+  const mine = grid([['내 메모'], ['여행 준비물']]);
+  ctx.ss = { getSheetByName: (n) => (n === '안내' ? mine : null) };
+  run('upgradeTabs_(ss)');
+  assert.strictEqual(mine.data()[0][0], '내 메모', "a user's own 안내 tab is left alone");
+});
