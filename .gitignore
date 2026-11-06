@@ -1,0 +1,17 @@
+# Personal data & local artifacts — never commit
+import/
+.shots/
+prototype/places.js
+docs/DESIGN.md
+*.kml
+
+# clasp project files (contain your script IDs) — copy .clasp.json.example
+apps-script/.clasp.json
+apps-script/.clasp.template.json
+
+# build output (python3 apps-script/build.py)
+apps-script/index.html
+apps-script/js_*.html
+
+__pycache__/
+node_modules/
