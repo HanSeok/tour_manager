@@ -48,6 +48,28 @@ const MOCK_RAW_EVENTS = [
 ];
 
 const SEED_EXPENSES = [
-  { id: '1', date: '2027-04-10', category: '교통', item: '렌터카 (예시)', amount: 28000, payer: '나', method: '카드' },
-  { id: '2', date: '2027-04-10', category: '식비', item: '공항 편의점 (예시)', amount: 1240, payer: '동행', method: '현금' },
+  { id: '1', date: '2027-04-10', time: '15:10', category: '교통', item: '렌터카 (예시)', amount: 28000, payer: '나', method: '카드' },
+  { id: '2', date: '2027-04-10', time: '14:40', category: '식비', item: '공항 편의점 (예시)', amount: 1240, payer: '동행', method: '현금' },
+  { id: '3', date: '2027-04-11', time: '12:20', category: '식비', item: '소바 점심 (예시)', amount: 2400, payer: '나', method: '카드' },
+  { id: '4', date: '2027-04-11', time: '18:50', category: '식비', item: '스테이크 저녁 (예시)', amount: 9800, payer: '동행', method: '카드' },
+  { id: '5', date: '2027-04-12', time: '10:30', category: '관광', item: '수족관 입장권 (예시)', amount: 4360, payer: '나', method: '카드' },
 ];
+
+// Photo slots for the timeline preview. Real photos come from Google Photos later; `tone` colors the placeholder tile.
+const SAMPLE_PHOTOS = [
+  { id: 'p1', date: '2027-04-10', time: '14:20', caption: '도착!', tone: '#8ecae6' },
+  { id: 'p2', date: '2027-04-11', time: '12:35', caption: '소바', tone: '#f4a261' },
+  { id: 'p3', date: '2027-04-11', time: '12:41', caption: '', tone: '#e9c46a' },
+  { id: 'p4', date: '2027-04-11', time: '19:05', caption: '스테이크', tone: '#e76f51' },
+  { id: 'p5', date: '2027-04-12', time: '11:10', caption: '수족관', tone: '#2a9d8f' },
+];
+
+// ?demo=1 sample day: Monday 4/12 (the soba shop is closed on Mondays), a lunch slot with three candidates and a rest block.
+const SEED_ROUTES = {
+  '2027-04-12': [
+    { id: 's-churaumi', stayMin: 120 },
+    { sid: 'seed-lunch', label: '점심', cands: ['s-soba', 's-steak', 's-cafe'], pick: null, stayMin: 60 },
+    { sid: 'seed-rest', label: '휴식', cands: [], pick: null, stayMin: 40 },
+    { id: 's-american', stayMin: 90 },
+  ],
+};

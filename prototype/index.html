@@ -126,6 +126,39 @@ h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: v
 .daycard li time { color: var(--muted); }
 .daycard li > span { min-width: 0; }
 .daycard footer { padding: 8px 14px 12px; display: flex; justify-content: space-between; align-items: center; font-size: 13px; color: var(--muted); }
+/* candidate slots */
+.card.slot .cands { list-style: none; margin: 8px 0 4px; padding: 0; display: grid; gap: 6px; }
+.cand { display: flex; justify-content: space-between; gap: 8px; align-items: center; flex-wrap: wrap; padding: 6px 8px; border: 1px solid var(--line); border-radius: 10px; background: #fff; }
+.cand.chosen { border-color: var(--sea); box-shadow: inset 0 0 0 1px var(--sea); }
+.cand.out { opacity: .55; }
+.cand.out b { text-decoration: line-through; }
+.cand small { display: block; color: var(--muted); font-size: 11.5px; }
+.cand .acts, .vis { display: inline-flex; gap: 4px; flex-wrap: wrap; }
+.cand-add { border: 1px dashed var(--line); border-radius: 999px; padding: 4px 8px; font-size: 12.5px; background: none; color: var(--muted); }
+.slot-new { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 0 0 10px; }
+.slot-new small { color: var(--muted); }
+.tl-day li.muted { opacity: .55; }
+.card.slot .badge, .cand .badge { white-space: nowrap; }
+.card.slot .row > span:first-child { min-width: 0; }
+/* phase banner + timeline */
+.phase { display: flex; gap: 10px; align-items: center; padding: 10px 14px; border-radius: var(--radius); background: var(--sea-soft); color: var(--sea); font-size: 13.5px; font-weight: 600; margin-bottom: 12px; }
+.phase b { font-size: 15px; }
+.phase.done { background: #efe9dc; color: var(--ink); }
+.tl-day { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); margin-bottom: 12px; overflow: hidden; box-shadow: var(--shadow); }
+.tl-day > header { display: flex; justify-content: space-between; align-items: baseline; padding: 10px 14px; background: var(--sea); color: #fff; }
+.tl-day > header small { opacity: .85; }
+.tl-day ol { list-style: none; margin: 0; padding: 8px 14px 4px; }
+.tl-day li { display: grid; grid-template-columns: 46px 20px 1fr; gap: 6px; padding: 7px 0; font-size: 14px; font-variant-numeric: tabular-nums; border-left: 0; }
+.tl-day li time { color: var(--muted); font-size: 12.5px; padding-top: 2px; }
+.tl-day li .tl-ico { text-align: center; }
+.tl-day li small { display: block; color: var(--muted); font-size: 12px; }
+.tl-day .amt { float: right; font-weight: 700; }
+.tl-day .none { color: var(--muted); padding: 8px 0 12px; font-size: 13px; }
+.tl-photos { display: flex; gap: 6px; flex-wrap: wrap; }
+.tl-photo { width: 84px; height: 84px; border-radius: 10px; background: var(--tone, #ccc); display: flex; flex-direction: column; align-items: center; justify-content: center; color: #fff; font-size: 11px; text-shadow: 0 1px 2px rgba(0,0,0,.35); }
+.tl-photo span { font-size: 22px; }
+.tl-day footer { padding: 4px 14px 12px; }
+.tl-day footer button { border: 1px dashed var(--line); background: none; color: var(--muted); border-radius: 999px; padding: 6px 12px; font-size: 12.5px; }
 .link { border: 0; background: var(--sea-soft); color: var(--sea); font-weight: 700; padding: 6px 12px; border-radius: 999px; }
 
 .pin { width: 26px; height: 26px; border-radius: 50% 50% 50% 0; transform: rotate(-45deg); border: 2px solid #fff; box-shadow: 0 2px 6px rgba(0,0,0,.3); display: grid; place-items: center; }
@@ -207,10 +240,12 @@ body.readonly .start-place, body.readonly .start-time, body.readonly .ev-place {
       <button role="tab" data-tab="route">동선</button>
       <button role="tab" data-tab="money">지출</button>
       <button role="tab" data-tab="plan">일정</button>
+      <button role="tab" data-tab="timeline">타임라인</button>
     </nav>
     <div class="tab" id="tab-route"></div>
     <div class="tab" id="tab-money"></div>
     <div class="tab" id="tab-plan"></div>
+    <div class="tab" id="tab-timeline"></div>
   </section>
 </main>
 <script>
@@ -222,11 +257,13 @@ window.addEventListener('error', (e) => {
 </script>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="route.js"></script>
+<script src="slots.js"></script>
 <script src="schedule.js"></script>
 <script src="hours.js"></script>
 <script src="data.js"></script>
 <script src="remote.js"></script>
 <script src="settle.js"></script>
+<script src="timeline.js"></script>
 <script src="money.js"></script>
 <script src="app.js"></script>
 </body>

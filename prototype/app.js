@@ -59,11 +59,13 @@ const store = {
 
 // "Today" on the trip's clock (a companion at home in another zone still sees the trip's date).
 const todayTrip = () => {
+  const forced = !IS_GAS && new URLSearchParams(location.search).get('today'); // prototype only: ?today=2027-04-11 previews a phase
+  if (/^\d{4}-\d{2}-\d{2}$/.test(forced || '')) return forced;
   try { return new Intl.DateTimeFormat('en-CA', { timeZone: CFG.timezone }).format(new Date()); } catch { return isoOf(new Date()); }
 };
-const PERSISTED = ['routes', 'starts', 'startFrom', 'expenses', 'eventPlace', 'calendarAdds', 'draft', 'outbox'];
+const PERSISTED = ['routes', 'starts', 'startFrom', 'expenses', 'eventPlace', 'calendarAdds', 'draft', 'outbox', 'visits'];
 const EMPTY_DRAFT = { amount: '', category: '식비', item: '', payer: '', method: '', date: '', currency: 'local' };
-const PERSISTED_DEFAULT = { expenses: IS_GAS ? [] : SEED_EXPENSES, outbox: [], draft: EMPTY_DRAFT };
+const PERSISTED_DEFAULT = { expenses: IS_GAS ? [] : SEED_EXPENSES, outbox: [], draft: EMPTY_DRAFT, visits: [] };
 let state = {
   tab: 'route', date: '', layer: '전체', error: '',
   ...Object.fromEntries(PERSISTED.map((k) => [k, store.get(k, k in PERSISTED_DEFAULT ? PERSISTED_DEFAULT[k] : {})])),
@@ -71,6 +73,10 @@ let state = {
   isStale: false, // showing the cached copy from the last visit while the server loads → read-only
 };
 state = { ...state, draft: { ...EMPTY_DRAFT, ...state.draft } };
+// Slots (candidate places per time block) live in state.routes, which the Apps Script server only accepts as single places:
+// they are on in the prototype and wait for the Go server. ?demo=1 previews a sample day (not saved until you change something).
+const SLOTS_ON = !IS_GAS;
+if (SLOTS_ON && new URLSearchParams(location.search).has('demo')) state = { ...state, routes: SEED_ROUTES, visits: [] };
 const isEditable = () => CAN_EDIT && !state.isStale;
 
 function applyConfig(cfg) {
@@ -81,6 +87,7 @@ function applyConfig(cfg) {
   state = {
     ...state,
     date: DATES.includes(state.date) ? state.date : DATES[0],
+    tab: state.tabChosen ? state.tab : Timeline.phaseOf(todayTrip(), cfg.start, cfg.end) === 'done' ? 'timeline' : state.tab, // finished trip opens on its story
     draft: { ...state.draft, payer: pick(cfg.payers, state.draft.payer), method: pick(cfg.methods, state.draft.method),
       date: state.draft.date && state.draft.date <= cfg.end ? state.draft.date : (DATES.includes(todayTrip()) ? todayTrip() : DATES[0]) },
   };
@@ -155,6 +162,26 @@ const allEvents = () => (IS_GAS ? EVENTS : [...EVENTS, ...Object.values(state.ca
 const isFlight = (e) => ['flightIn', 'flightOut'].includes(Schedule.kindOf(e));
 const placeOf = (e) => state.eventPlace[e.id] || e.placeId || (isFlight(e) && AIRPORT ? AIRPORT.id : null);
 
+const isLocated = (p) => Boolean(p) && p.lat != null;
+const visitsOn = (date) => state.visits.filter((v) => v.date === date);
+
+/** Current clock time on the trip's timezone (HH:mm). */
+function nowTrip() {
+  try {
+    const p = new Intl.DateTimeFormat('en-GB', { timeZone: CFG.timezone, hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }).formatToParts(new Date());
+    return { time: `${p.find((x) => x.type === 'hour').value}:${p.find((x) => x.type === 'minute').value}` };
+  } catch { const d = new Date(); return { time: `${pad(d.getHours())}:${pad(d.getMinutes())}` }; }
+}
+
+/** A slot stop → the place it resolved to (or a place-less block) + what the cards need to draw it. */
+function resolvedStop(raw, leg, item, visits) {
+  const norm = Slots.normalizeItem(item);
+  const visitedId = ([...Slots.candidateResults(visits, norm.sid)].find(([k, r]) => k && r.result === 'visited') || [])[0] || null;
+  const slot = { ...leg.slot, sid: norm.sid, label: raw.label, cands: norm.cands.filter((id) => byId[id]), pickId: raw.pickId, status: Slots.statusOf(item, visits), visitedId };
+  if (leg.id == null) return { id: null, name: raw.label || '쉬는 시간', noPlace: true, stayMin: raw.stayMin, slot, item, status: slot.status };
+  return { ...byId[leg.id], stayMin: raw.stayMin, slot, item, status: slot.status };
+}
+
 function planFor(date) {
   const events = allEvents(), wd = weekday(date);
   const auto = Schedule.dayStart(date, events, placeOf, AIRPORT && AIRPORT.id);
@@ -163,18 +190,31 @@ function planFor(date) {
   if (!start) return { date, wd, auto, start: null, startMin, order: [], stops: [], isCustom: false, legs: [], endMin: startMin, travelTotal: 0 };
   const fixed = Schedule.fixedStops(date, events, placeOf, auto.eventId).filter((f) => byId[f.placeId]);
   const fixedBy = Object.fromEntries(fixed.map((f) => [f.ev, f]));
-  const order = Schedule.mergeOrder((state.routes[date] || []).filter((s) => s.ev || byId[s.id]), fixed);
-  const stops = order.map((s) => (s.ev ? { ...byId[fixedBy[s.ev].placeId], ...fixedBy[s.ev] } : { ...byId[s.id], stayMin: s.stayMin }));
+  const visits = visitsOn(date);
+  const order = Schedule.mergeOrder((state.routes[date] || []).filter((s) => s.ev || Slots.isSlotItem(s) || byId[s.id]), fixed);
+  const raw = order.map((s) => (s.ev ? { ...byId[fixedBy[s.ev].placeId], ...fixedBy[s.ev] } : Slots.isSlotItem(s) ? Slots.toStop(s, byId, visits) : { ...byId[s.id], stayMin: s.stayMin }));
   const isCustom = date in state.startFrom || date in state.starts;
-  return { date, wd, auto, start, startMin, order, stops, isCustom, ...Route.planRoute({ weekday: wd, startMin, start, stops, travelFn: (a, b, t) => travelMin(a, b, date, t) }) };
+  const planned = Route.planRoute({
+    weekday: wd, startMin, start, stops: raw,
+    travelFn: (a, b, t) => travelMin(a, b, date, t),
+    candTravelFn: (a, b) => Route.mockTravelMin(a, b, CFG.travelMode), // candidates are compared with the cheap estimate
+  });
+  const stops = raw.map((s, i) => (s.cands ? resolvedStop(s, planned.legs[i], order[i], visits) : s.fixed ? s : { ...s, item: order[i], status: Slots.statusOf(order[i], visits) }));
+  return { date, wd, auto, start, startMin, order, stops, isCustom, ...planned };
 }
 
 function routeEvents(plan) {
-  return plan.legs.flatMap((l, i) => (plan.stops[i].fixed ? [] : [{
-    id: `r-${plan.date}-${i}`, kind: 'route', date: plan.date, placeId: plan.stops[i].id, location: plan.stops[i].name,
-    start: fmtClock(l.arrive + l.wait), end: fmtClock(l.depart), title: `📍 ${plan.stops[i].name}`,
-    startMin: l.arrive + l.wait, endMin: l.depart,
-  }]));
+  return plan.legs.flatMap((l, i) => {
+    const s = plan.stops[i];
+    if (s.fixed) return [];
+    const label = s.slot && s.slot.label ? `${s.slot.label} · ` : '';
+    const title = s.noPlace ? `📍 ${s.name}` : `📍 ${label}${s.name}${s.slot && s.slot.tentative && s.slot.status !== 'visited' ? ' (미정)' : ''}`;
+    return [{
+      id: `r-${plan.date}-${i}`, kind: 'route', date: plan.date, placeId: s.id || undefined, location: s.noPlace ? '' : s.name,
+      start: fmtClock(l.arrive + l.wait), end: fmtClock(l.depart), title,
+      startMin: l.arrive + l.wait, endMin: l.depart,
+    }];
+  });
 }
 
 const registeredOn = (date) => allEvents().filter((e) => e.kind === 'route' && e.date === date);
@@ -203,6 +243,7 @@ function hoursText(p, wd) {
 }
 
 function gmapsUrl(start, stops) {
+  if (!stops.length) return GMAPS;
   const q = (p) => `${p.lat},${p.lng}`;
   const wp = stops.slice(0, -1).map(q).join('|');
   return `${GMAPS}/dir/?api=1&origin=${q(start)}&destination=${q(stops[stops.length - 1])}${wp ? `&waypoints=${encodeURIComponent(wp)}` : ''}&travelmode=${CFG.travelMode || 'driving'}`;
@@ -233,7 +274,7 @@ function renderMap(plan) {
   if (!plan.start) return;
   const label = {};
   let n = 0;
-  plan.stops.forEach((s) => { label[s.id] = s.fixed ? KIND_ICON[s.kind] : String(++n); });
+  plan.stops.forEach((s) => { if (s.id) label[s.id] = s.fixed ? KIND_ICON[s.kind] : String(++n); });
   const initial = (p) => p.layer.slice(0, 1); // shape-independent of colour: 식/관/쇼/숙/교
   label[plan.start.id] = '출';
   const userIds = new Set(plan.stops.filter((s) => !s.fixed).map((s) => s.id));
@@ -246,7 +287,7 @@ function renderMap(plan) {
       .bindPopup(`<div class="pop"><b>${esc(p.name)}</b><p>${esc(p.category)}${p.rating ? ` · ★${p.rating} (${p.reviews ?? 0})` : ''}${p.price ? ` · ${esc(p.price)}` : ''}<br>${md(plan.date)}(${WD[plan.wd]}) ${esc(hoursText(p, plan.wd))}</p>${action}<a href="${esc(p.url)}" target="_blank" rel="noopener">Google 지도 ↗</a></div>`)
       .addTo(pins);
   });
-  const pts = [plan.start, ...plan.stops].map((p) => [p.lat, p.lng]);
+  const pts = [plan.start, ...plan.stops].filter(isLocated).map((p) => [p.lat, p.lng]);
   if (pts.length > 1) L.polyline(pts, { color: '#1d2a2e', weight: 3, dashArray: '6 6', opacity: 0.8 }).addTo(pins);
 }
 // Leaflet swallows some clicks inside popups → bind directly when opened.
@@ -266,15 +307,74 @@ function stopCard(l, s, i, num, wd) {
     l.wait > 0 && `<span class="badge WAIT">개점까지 ${dur(l.wait)} 대기</span>`,
   ].filter(Boolean).join('');
   return `<li class="node"><span class="num">${num}</span><div class="card ${l.warn ? `warn-${l.warn}` : ''}">
-    <div class="row"><b>${esc(s.name)}</b><span class="ctrl">${moveCtrl(i)}<button data-del="${i}" aria-label="삭제">✕</button></span></div>
+    <div class="row"><span><b>${esc(s.name)}</b>${s.status === 'visited' ? ' <span class="badge OK">✅ 방문함</span>' : ''}</span><span class="ctrl">${moveCtrl(i)}<button data-del="${i}" aria-label="삭제">✕</button></span></div>
     <div class="times"><div><small>도착</small><b>${fmtClock(l.arrive)}</b></div>
       <div class="avail"><small>머물 수 있는 시간</small><b>${l.availMin == null ? '제한 없음' : dur(l.availMin)}</b></div>
       <div><small>출발</small><b>${fmtClock(l.depart)}</b></div></div>
     <div class="meta"><span>${s.hours ? '영업 ' : ''}${esc(hoursText(s, wd))}</span>
-      <label>체류 <input type="number" min="0" max="${MAX_STAY_MIN}" step="10" data-stay="${i}" value="${s.stayMin}">분</label>${badges}</div>
+      <label>체류 <input type="number" min="0" max="${MAX_STAY_MIN}" step="10" data-stay="${i}" value="${s.stayMin}">분</label>${badges}${visitControls(s)}</div>
   </div></li>`;
 }
 
+/* ---------- slots: several candidate places for one time block ---------- */
+const isLive = () => phaseNow() !== 'planning'; // visit / closed records only make sense once the trip has started
+const SLOT_LABELS = ['점심', '저녁', '카페', '간식', '휴식'];
+const STATUS_BADGE = {
+  decided: '<span class="badge OK">확정</span>', open: '<span class="badge WAIT">미정</span>',
+  visited: '<span class="badge OK">✅ 방문함</span>', skipped: '<span class="badge SHORT">⏭️ 건너뜀</span>',
+};
+const candNote = (c) => (c.warn === 'CLOSED' ? '도착하면 휴무/마감' : c.warn === 'SHORT' ? `머물 수 있는 시간 ${dur(c.availMin)}` : c.warn === 'NO_HOURS' ? '영업시간 미상' : c.wait > 0 ? `개점까지 ${dur(c.wait)} 대기` : '영업 중');
+
+/** "방문함 / 닫혀 있음" for a plain (single-place) stop. */
+function visitControls(s) {
+  if (!SLOTS_ON || !isLive() || s.fixed || !s.id || s.status === 'visited') return '';
+  const a = `data-place="${esc(s.id)}"`;
+  return `<span class="edit-only vis"><button class="mini" data-visited="p:${esc(s.id)}" ${a}>✅ 방문함</button><button class="mini" data-closed="p:${esc(s.id)}" ${a}>🚫 닫혀 있음</button></span>`;
+}
+
+function candRow(s, id, l) {
+  const sl = s.slot, p = byId[id], c = sl.candidates.find((x) => x.id === id), sid = esc(sl.sid), pid = esc(id);
+  const out = sl.excluded.includes(id), chosen = l.id === id, picked = sl.pickId === id && !out, done = sl.status === 'visited';
+  const tag = out ? '<span class="badge CLOSED">🚫 닫힘</span>'
+    : chosen ? (done ? '<span class="badge OK">✅ 방문함</span>' : sl.tentative ? '<span class="badge WAIT">임시 선택</span>' : '<span class="badge OK">확정</span>') : '';
+  const live = isLive();
+  const acts = done ? '' : out ? `<button class="mini" data-reopen="${sid}" data-place="${pid}">다시 열기</button>` : [
+    !picked && `<button class="mini" data-slot-confirm="${sid}" data-place="${pid}">확정</button>`,
+    live && `<button class="mini" data-visited="${sid}" data-place="${pid}">✅ 방문함</button>`,
+    live && `<button class="mini" data-closed="${sid}" data-place="${pid}">🚫 닫혀 있음</button>`,
+    `<button class="mini" data-cand-del="${sid}" data-place="${pid}" aria-label="후보에서 빼기">✕</button>`,
+  ].filter(Boolean).join('');
+  return `<li class="cand ${out ? 'out' : ''} ${chosen ? 'chosen' : ''}"><div><b>${esc(p ? p.name : id)}</b> ${tag}${!out && c ? `<small>${candNote(c)}</small>` : ''}</div><span class="acts edit-only">${acts}</span></li>`;
+}
+
+function slotCard(l, s, i, num, wd) {
+  const sl = s.slot, sid = esc(sl.sid);
+  const badges = [
+    l.warn === 'NO_CANDIDATE' && '<span class="badge CLOSED">후보가 모두 닫혔습니다 — 새 후보를 추가하세요</span>',
+    l.warn === 'CLOSED' && '<span class="badge CLOSED">도착하면 영업 종료/휴무</span>',
+    l.warn === 'SHORT' && `<span class="badge SHORT">희망 체류보다 ${dur(s.stayMin - l.availMin)} 부족</span>`,
+    l.wait > 0 && `<span class="badge WAIT">개점까지 ${dur(l.wait)} 대기</span>`,
+  ].filter(Boolean).join('');
+  const times = s.noPlace
+    ? `<div class="times"><div><small>시작</small><b>${fmtClock(l.arrive)}</b></div><div><small>끝</small><b>${fmtClock(l.depart)}</b></div></div>`
+    : `<div class="times"><div><small>도착</small><b>${fmtClock(l.arrive)}</b></div><div class="avail"><small>머물 수 있는 시간</small><b>${l.availMin == null ? '제한 없음' : dur(l.availMin)}</b></div><div><small>출발</small><b>${fmtClock(l.depart)}</b></div></div>`;
+  const options = PLACES.filter((p) => !sl.cands.includes(p.id)).map((p) => `<option value="${esc(p.id)}">${esc(p.name)}</option>`).join('');
+  const skip = sl.status === 'skipped' ? `<button class="mini edit-only" data-reopen="${sid}" data-place="">다시 열기</button>`
+    : isLive() && sl.status !== 'visited' ? `<button class="mini edit-only" data-skip="${sid}">⏭️ 건너뜀</button>` : '';
+  const title = `${sl.label ? `<b>${esc(sl.label)}</b>` : ''}${s.noPlace ? '' : ` → <b>${esc(s.name)}</b>`}`;
+  return `<li class="node"><span class="num ${s.noPlace ? 'fixed' : ''}">${s.noPlace ? '☕' : num}</span><div class="card slot ${l.warn ? `warn-${l.warn}` : ''}">
+    <div class="row"><span>${title} ${STATUS_BADGE[sl.status]}</span><span class="ctrl">${moveCtrl(i)}<button data-del="${i}" aria-label="삭제">✕</button></span></div>
+    ${times}
+    ${sl.cands.length ? `<ul class="cands">${sl.cands.map((id) => candRow(s, id, l)).join('')}</ul>` : '<p class="regnote">후보 없이 쉬는 시간으로 잡혀 있습니다. 후보를 추가하면 갈 곳이 됩니다</p>'}
+    <div class="meta"><select class="cand-add edit-only" data-cand-add="${sid}" aria-label="후보 추가"><option value="">＋ 후보 추가</option>${options}</select>
+      <label>체류 <input type="number" min="0" max="${MAX_STAY_MIN}" step="10" data-stay="${i}" value="${s.stayMin}">분</label>${badges}${skip}</div></div></li>`;
+}
+
+function slotToolbar() {
+  if (!SLOTS_ON) return '';
+  return `<div class="slot-new"><select id="slotLabel" aria-label="후보 묶음 종류">${SLOT_LABELS.map((x) => `<option>${x}</option>`).join('')}</select>
+    <button class="mini" data-slot-new="1">＋ 후보 묶음 추가</button><small>같은 시간대에 갈 만한 곳을 여러 곳 두고, 현지에서 한 곳을 고릅니다</small></div>`;
+}
 function fixedCard(l, s, i) {
   const isEnd = s.fixed.isEnd;
   const status = l.warn === 'LATE' ? `<span class="badge CLOSED">${dur(l.lateMin)} 늦음 — 앞 일정을 줄이세요</span>`
@@ -314,26 +414,29 @@ function renderRoute(plan) {
   }
   const userIds = new Set(plan.stops.filter((s) => !s.fixed).map((s) => s.id));
   const dates = DATES.map((d) => {
-    const p = planFor(d), n = p.stops.filter((s) => !s.fixed).length, st = regStatus(p);
+    const p = planFor(d), n = p.stops.filter((s) => !s.fixed && !s.noPlace).length, st = regStatus(p);
     return `<button data-date="${d}" aria-pressed="${d === state.date}">${md(d)}<small>${WD[weekday(d)]} · ${n}곳${st === 'synced' ? ' ✓' : ''}</small></button>`;
   }).join('');
   const filters = ['전체', ...LAYERS].map((l) => `<button class="chip" data-layer="${l}" aria-pressed="${l === state.layer}">${l}</button>`).join('');
   const chips = PLACES.filter((p) => state.layer === '전체' || p.layer === state.layer)
     .map((p) => `<button class="chip ${userIds.has(p.id) ? 'in' : ''}" data-add="${esc(p.id)}" title="${esc(hoursText(p, plan.wd))}"><i class="dot" style="background:${layerColor(p.layer)}"></i>${esc(p.name)}</button>`).join('');
   let num = 0;
+  const prevPlace = (i) => { for (let k = i - 1; k >= 0; k -= 1) if (isLocated(plan.stops[k])) return plan.stops[k]; return plan.start; };
   const legs = plan.legs.map((l, i) => {
     const s = plan.stops[i];
-    const prev = i ? plan.stops[i - 1] : plan.start;
+    if (s.noPlace) return slotCard(l, s, i, '', plan.wd); // no place, no travel
+    const prev = prevPlace(i);
     const t0 = l.arrive - l.travelMin;
     const drive = isEstimated(prev, s, plan.date, t0) ? `~${dur(l.travelMin)} <small>(직선거리 추정${isTravelLoadingFor(prev, s, plan.date, t0) ? ' · 경로 조회 중' : ''})</small>` : dur(l.travelMin);
     const legUrl = `${GMAPS}/dir/?api=1&origin=${prev.lat},${prev.lng}&destination=${s.lat},${s.lng}&travelmode=${CFG.travelMode || 'driving'}`;
-    return `<li class="drive"><a href="${legUrl}" target="_blank" rel="noopener" title="Google 지도에서 이 구간 실시간 소요시간 보기">${MODE_ICON[CFG.travelMode] || '🚗'} ${drive} <span class="ext">지도앱 ↗</span></a></li>${s.fixed ? fixedCard(l, s, i) : stopCard(l, s, i, ++num, plan.wd)}`;
+    const card = s.fixed ? fixedCard(l, s, i) : s.slot ? slotCard(l, s, i, ++num, plan.wd) : stopCard(l, s, i, ++num, plan.wd);
+    return `<li class="drive"><a href="${legUrl}" target="_blank" rel="noopener" title="Google 지도에서 이 구간 실시간 소요시간 보기">${MODE_ICON[CFG.travelMode] || '🚗'} ${drive} <span class="ext">지도앱 ↗</span></a></li>${card}`;
   }).join('');
   const warnCount = plan.legs.filter((l) => ['CLOSED', 'SHORT', 'LATE'].includes(l.warn)).length;
   const footer = plan.legs.length
     ? `<div class="summary"><div><small>종료 예상</small><b>${fmtClock(plan.endMin)}</b></div><div><small>총 ${MODE_NAME[CFG.travelMode] || '운전'}</small><b>${dur(plan.travelTotal)}</b></div><div><small>경고</small><b>${warnCount}건</b></div></div>
        ${state.busy ? `<div class="synced">${esc(state.busy)}</div>` : `<div class="edit-only">${REG_BUTTON[regStatus(plan)]}</div>`}
-       <p style="text-align:center"><a class="link" style="text-decoration:none;display:inline-block" target="_blank" rel="noopener" href="${gmapsUrl(plan.start, plan.stops)}">Google 지도 앱으로 길찾기 →</a></p>`
+       <p style="text-align:center"><a class="link" style="text-decoration:none;display:inline-block" target="_blank" rel="noopener" href="${gmapsUrl(plan.start, plan.stops.filter(isLocated))}">Google 지도 앱으로 길찾기 →</a></p>`
     : '';
   const empty = userIds.size ? '' : `<div class="empty">${isEditable() ? '아래 장소나 지도의 핀을 누르면 동선에 추가됩니다. 캘린더 일정(📌🏨✈️)은 자동으로 들어갑니다' : '아직 이 날 동선이 없습니다'}</div>`;
   const sortBtn = userIds.size >= 2 ? '<p class="edit-only" style="text-align:right;margin:0 0 8px"><button class="mini" data-sort="1">📏 짧은 동선으로 정렬</button></p>' : '';
@@ -342,6 +445,7 @@ function renderRoute(plan) {
     <h2>${md(state.date)} (${WD[plan.wd]}) 동선</h2>
     ${sortBtn}<ol class="timeline">${startCard(plan)}${legs}</ol>${empty}${footer}
     <div class="edit-only"><h2>장소 추가 · 누르면 동선에 붙음 (숙소·공항 도착 전)</h2>
+    ${slotToolbar()}
     <div class="chips" style="margin-bottom:8px">${filters}</div>
     ${PLACES.length ? `<div class="chips pick">${chips}</div>` : `<div class="empty">${NO_PLACES_MSG}</div>`}</div>`;
 }
@@ -378,10 +482,60 @@ function checksList(checks) {
   return `<ul class="checks">${checks.map((c) => `<li><span>${CHECK_MARK[c.ok]}</span><b>${esc(c.label)}</b><small>${esc(c.detail || '')}</small></li>`).join('')}</ul>`;
 }
 
+/* ---------- timeline tab (places + payments + photos, by day) ---------- */
+const phaseNow = () => Timeline.phaseOf(todayTrip(), CFG.start, CFG.end);
+const allPhotos = () => (IS_GAS ? [] : SAMPLE_PHOTOS); // Apps Script mode has no photo store yet
+
+function timelineItems() {
+  const stops = DATES.flatMap((date) => {
+    const plan = planFor(date);
+    // a visited / skipped slot is told by its visit record instead of the plan
+    return plan.stops.flatMap((s, i) => (s.fixed || !plan.legs[i] || ['visited', 'skipped'].includes(s.status) ? [] : [{
+      date, min: plan.legs[i].arrive, kind: 'place', icon: s.noPlace ? '☕' : KIND_ICON.route,
+      name: `${s.slot && s.slot.label ? `${s.slot.label} · ` : ''}${s.name}${s.slot && s.slot.tentative && !s.noPlace ? ' (미정)' : ''}`,
+    }]));
+  });
+  const marks = { visited: ['✅', ''], closed: ['🚫', ' · 닫혀 있었음'], skipped: ['⏭️', ' · 건너뜀'] };
+  const visits = state.visits.filter((v) => DATES.includes(v.date) && marks[v.result]).map((v) => ({
+    date: v.date, min: Timeline.toMin(v.time), kind: 'place', icon: marks[v.result][0], muted: v.result !== 'visited',
+    name: `${byId[v.placeId] ? byId[v.placeId].name : v.label || '일정'}${marks[v.result][1]}`,
+  }));
+  const events = allEvents().filter((e) => e.kind !== 'route' && DATES.includes(e.date))
+    .map((e) => ({ date: e.date, min: Timeline.toMin(e.start), kind: 'place', icon: KIND_ICON[Schedule.kindOf(e)] || '📌', name: e.title }));
+  const spent = allExpenses().filter((e) => DATES.includes(e.date)).map((e) => ({ ...e, min: Timeline.toMin(e.time), kind: 'expense' }));
+  const photos = allPhotos().filter((p) => DATES.includes(p.date)).map((p) => ({ ...p, min: Timeline.toMin(p.time), kind: 'photo' }));
+  return [...stops, ...visits, ...events, ...spent, ...photos];
+}
+
+const PHASE_BANNER = {
+  planning: (d) => `<b>🗺️ 계획 중</b> 여행까지 D-${d} · 동선 탭에서 하루 일정을 짜 보세요`,
+  live: () => '<b>🧳 진행 중</b> 오늘 쓴 돈과 다녀온 곳이 여기에 날짜별로 쌓입니다',
+  done: () => '<b>📖 완료된 여행</b> 사진과 정산은 지금도 추가할 수 있어요',
+};
+
+function entryHtml(e) {
+  const t = e.min == null ? '' : fmt(e.min % 1440);
+  if (e.kind === 'place') return `<li class="${e.muted ? 'muted' : ''}"><time>${t}</time><span class="tl-ico">${e.icon}</span><span>${esc(e.name)}</span></li>`;
+  if (e.kind === 'expense') return `<li><time>${t}</time><span class="tl-ico">💳</span><span><span class="amt">${local(e.amount)}</span>${esc(e.item)}<small>${esc(e.category)} · ${esc(e.payer)} · ${esc(e.method)}</small></span></li>`;
+  return `<li><time>${t}</time><span class="tl-ico">📷</span><span><div class="tl-photos"><div class="tl-photo" style="--tone:${esc(e.tone || '#ccc')}"><span>📷</span>${esc(e.caption || '')}</div></div></span></li>`;
+}
+
+function renderTimeline() {
+  const phase = phaseNow();
+  const days = Math.round((Date.parse(`${CFG.start}T00:00:00Z`) - Date.parse(`${todayTrip()}T00:00:00Z`)) / 86400000);
+  const banner = `<div class="phase ${phase}">${PHASE_BANNER[phase](days)}</div>`;
+  const body = Timeline.buildTimeline(DATES, timelineItems()).map((day, i) => {
+    const list = day.entries.map(entryHtml).join('') || '<li><span></span><span></span><span class="none">기록 없음</span></li>';
+    const add = phase === 'planning' ? '' : '<footer><button type="button" disabled title="Google Photos 연동 후 사용할 수 있습니다">📷 사진 추가 (준비 중)</button></footer>';
+    return `<article class="tl-day"><header><b>Day ${i + 1} · ${md(day.date)} (${WD[weekday(day.date)]})</b><small>${day.expenseTotal ? local(day.expenseTotal) : ''}</small></header><ol>${list}</ol>${add}</article>`;
+  }).join('');
+  $('#tab-timeline').innerHTML = banner + body;
+}
+
 /* ---------- shell ---------- */
 function renderHeader() {
   const days = Math.round((Date.parse(`${CFG.start}T00:00:00Z`) - Date.parse(`${todayTrip()}T00:00:00Z`)) / 86400000);
-  $('#dday').textContent = days > 0 ? `D-${days}` : days === 0 ? 'D-DAY' : `Day ${1 - days}`;
+  $('#dday').textContent = phaseNow() === 'done' ? '완료' : days > 0 ? `D-${days}` : days === 0 ? 'D-DAY' : `Day ${1 - days}`;
   const ex = allExpenses();
   const total = sum(ex);
   $('#spentJpy').textContent = local(total);
@@ -394,14 +548,14 @@ function renderHeader() {
 function render() {
   const plan = planFor(state.date);
   document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', b.dataset.tab === state.tab));
-  ['route', 'money', 'plan'].forEach((t) => { $(`#tab-${t}`).hidden = t !== state.tab; });
+  ['route', 'money', 'plan', 'timeline'].forEach((t) => { $(`#tab-${t}`).hidden = t !== state.tab; });
   document.body.classList.toggle('readonly', !isEditable());
-  renderHeader(); renderRoute(plan); renderMoney(); renderPlan(); renderMap(plan);
+  renderHeader(); renderRoute(plan); renderMoney(); renderPlan(); renderTimeline(); renderMap(plan);
   flushTravel();
 }
 
 function handleButton(ds) {
-  if (ds.tab) return setState({ tab: ds.tab });
+  if (ds.tab) return setState({ tab: ds.tab, tabChosen: true });
   if (ds.date) return setState({ date: ds.date });
   if (ds.goto) return setState({ tab: 'route', date: ds.goto });
   if (ds.layer) return setState({ layer: ds.layer });
@@ -421,6 +575,39 @@ function handleButton(ds) {
     [r[i], r[j]] = [r[j], r[i]];
     setRoute(r);
   };
+  if (SLOTS_ON) { // candidate slots + visit records
+    const sidOf = (s) => (Slots.normalizeItem(s) || {}).sid;
+    const at = (sid) => order.findIndex((s) => sidOf(s) === sid);
+    const patch = (sid, fn, extra = {}) => {
+      const k = at(sid);
+      return setState({ ...(k < 0 ? {} : { routes: { ...state.routes, [state.date]: order.map((s, j) => (j === k ? fn(s) : s)) } }), ...extra });
+    };
+    const rec = (sid, place, result, label) => ({ id: newId(), sid, date: state.date, placeId: place || null, result, label: label || '', time: nowTrip().time, at: new Date().toISOString() });
+    const nameOf = (place) => (byId[place] ? byId[place].name : '');
+    if (ds.slotNew) {
+      const label = ($('#slotLabel') || {}).value || '점심';
+      const n = order.reduce((last, s, i) => (s.ev ? last : i + 1), 0);
+      return setRoute([...order.slice(0, n), Slots.newSlot({ sid: newId(), label, stayMin: label === '휴식' ? 40 : 60 }), ...order.slice(n)]);
+    }
+    if (ds.slotConfirm) return patch(ds.slotConfirm, (s) => Slots.confirm(s, ds.place));
+    if (ds.candDel) return patch(ds.candDel, (s) => Slots.removeCandidate(s, ds.place));
+    if (ds.visited) {
+      const k = at(ds.visited);
+      const extra = { visits: [...state.visits, rec(ds.visited, ds.place, 'visited', nameOf(ds.place))] };
+      return k >= 0 && Slots.isSlotItem(order[k]) ? patch(ds.visited, (s) => Slots.confirm(s, ds.place), extra) : setState(extra);
+    }
+    if (ds.closed) {
+      return patch(ds.closed, (s) => { const n = Slots.normalizeItem(s); return n.pick === ds.place ? Slots.clearPick(n) : n; },
+        { visits: [...state.visits, rec(ds.closed, ds.place, 'closed', nameOf(ds.place))] });
+    }
+    if (ds.skip) {
+      const it = order[at(ds.skip)];
+      return setState({ visits: [...state.visits, rec(ds.skip, null, 'skipped', (it && Slots.normalizeItem(it).label) || '')] });
+    }
+    if (ds.reopen) { // undo a closed / skipped record
+      return setState({ visits: state.visits.filter((v) => !(v.sid === ds.reopen && v.date === state.date && (v.placeId || '') === (ds.place || '') && v.result !== 'visited')) });
+    }
+  }
   if (ds.add) {
     if (order.some((s) => s.id === ds.add)) return;
     // after the last user stop (first stop → before calendar items); user can move it with ↑↓
@@ -439,7 +626,12 @@ function handleButton(ds) {
 
 /** User stops re-ordered to a shorter path; calendar items keep their slots. */
 function sortNearest(plan) {
-  return Route.sortStops(plan.start, plan.stops, plan.order.map((s) => Boolean(s.ev))).map((i) => plan.order[i]);
+  // place-less blocks (rest) keep their position; everything with a location is re-ordered around them
+  const at = plan.stops.map((s, i) => i).filter((i) => isLocated(plan.stops[i]));
+  const perm = Route.sortStops(plan.start, at.map((i) => plan.stops[i]), at.map((i) => Boolean(plan.order[i].ev)));
+  const out = [...plan.order];
+  at.forEach((i, k) => { out[i] = plan.order[at[perm[k]]]; });
+  return out;
 }
 
 document.addEventListener('click', (e) => {
@@ -466,6 +658,13 @@ document.addEventListener('change', (e) => {
     return setRoute(planFor(state.date).order.map((s, k) => (k === +t.dataset.stay ? { ...s, stayMin: v } : s)));
   }
   if (t.dataset.evPlace !== undefined) return setState({ eventPlace: { ...state.eventPlace, [t.dataset.evPlace]: t.value } });
+  if (SLOTS_ON && t.dataset.candAdd !== undefined) {
+    if (!t.value) return;
+    const order = planFor(state.date).order;
+    const k = order.findIndex((s) => (Slots.normalizeItem(s) || {}).sid === t.dataset.candAdd);
+    if (k < 0) return;
+    try { return setState({ routes: { ...state.routes, [state.date]: order.map((s, j) => (j === k ? Slots.addCandidate(s, t.value) : s)) } }); } catch (e) { showError(e.message); return render(); }
+  }
   if (t.id === 'startTime' && t.value) return setState({ starts: { ...state.starts, [state.date]: Schedule.toMin(t.value) } });
   if (t.id === 'startPlace') return setState({ startFrom: { ...state.startFrom, [state.date]: t.value } });
 });

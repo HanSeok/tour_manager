@@ -63,16 +63,52 @@
     };
   }
 
-  function planRoute({ weekday, startMin, start, stops, travelFn = mockTravelMin }) {
+  // How good a candidate looks at its arrival time (lower is better): open > hours unknown > too short or a long wait > closed.
+  // "Open" means open on arrival: a place that only opens after a long wait (break time, late opening) is no better than a short stay.
+  const MAX_EASY_WAIT_MIN = 30;
+  const tierOf = (warn, wait) => (warn === null ? (wait > MAX_EASY_WAIT_MIN ? 2 : 0) : warn === 'NO_HOURS' ? 1 : warn === 'SHORT' ? 2 : 3);
+
+  /** A slot is one time block with several candidate places: {cands:[place], pickId, excluded:[id], stayMin, label}.
+   *  The confirmed pick wins (even if it looks closed: a person decided). Otherwise the best candidate for the arrival
+   *  time, ties by list order. Candidates are judged with `candTravelFn` (cheap), so a 4-way lunch choice does not
+   *  cost 4 route lookups; only the chosen place goes through the real `travelFn`. */
+  function resolveSlot(slot, prev, t, weekday, candTravelFn) {
+    const skip = new Set(slot.excluded || []);
+    const live = (slot.cands || []).filter((c) => !skip.has(c.id));
+    const candidates = live.map((c, order) => {
+      const p = planStop({ ...c, stayMin: slot.stayMin }, t + candTravelFn(prev, c, t), weekday);
+      return { id: c.id, name: c.name, order, tier: tierOf(p.warn, p.wait), warn: p.warn, arrive: p.arrive, wait: p.wait, availMin: p.availMin, stayMin: p.stayMin };
+    });
+    const picked = slot.pickId == null ? null : live.find((c) => c.id === slot.pickId) || null;
+    const bestIdx = candidates.reduce((b, e) => (e.tier < candidates[b].tier ? e.order : b), 0);
+    return { place: picked || (live.length ? live[bestIdx] : null), tentative: !picked, candidates, excluded: [...skip] };
+  }
+
+  /** Stops may be plain places, calendar-fixed stops, or slots (`cands`). A slot with nothing to go to (a rest block,
+   *  or every candidate ruled out) only takes time: no travel, position unchanged (`warn: 'NO_CANDIDATE'` when
+   *  candidates existed but all were ruled out, so the UI can ask for a new one). */
+  function planRoute({ weekday, startMin, start, stops, travelFn = mockTravelMin, candTravelFn = mockTravelMin }) {
     let t = startMin, prev = start, travelTotal = 0;
-    const legs = stops.map((stop) => {
+    const legs = stops.map((raw) => {
+      let stop = raw, slot = null;
+      if (raw.cands) {
+        const r = resolveSlot(raw, prev, t, weekday, candTravelFn);
+        slot = { label: raw.label || '', tentative: r.tentative, candidates: r.candidates, excluded: r.excluded };
+        if (!r.place) {
+          const depart = t + raw.stayMin;
+          const leg = { id: null, travelMin: 0, arrive: t, wait: 0, open: null, close: null, availMin: null, stayMin: raw.stayMin, warn: r.excluded.length ? 'NO_CANDIDATE' : null, depart, slot };
+          t = depart;
+          return leg;
+        }
+        stop = { ...r.place, stayMin: raw.stayMin };
+      }
       const travelMin = travelFn(prev, stop, t); // t = departure minute of this leg
       const leg = planStop(stop, t + travelMin, weekday);
       const depart = leg.arrive + leg.wait + leg.stayMin;
       travelTotal += travelMin;
       t = depart;
       prev = stop;
-      return { id: stop.id, travelMin, ...leg, depart };
+      return { id: stop.id, travelMin, ...leg, depart, ...(slot ? { slot } : {}) };
     });
     return { legs, endMin: t, travelTotal };
   }
