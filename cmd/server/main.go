@@ -8,11 +8,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
 	_ "time/tzdata" // IANA zones inside the binary (the container has no tzdata)
 
+	"tourmanager/internal/envfile"
 	"tourmanager/internal/server"
 	"tourmanager/prototype"
 )
@@ -27,6 +30,12 @@ func env(key, def string) string {
 }
 
 func main() {
+	// .env (ENV_FILE to point elsewhere) fills in what the environment does not already set
+	if set, err := envfile.Load(env("ENV_FILE", ".env")); err != nil {
+		log.Fatalf(".env 를 읽지 못했습니다: %v", err)
+	} else if len(set) > 0 {
+		log.Printf(".env 에서 %d개 설정을 읽었습니다", len(set))
+	}
 	baseURL := env("BASE_URL", "http://localhost:8080")
 	cfg := server.Config{
 		BaseURL:       baseURL,
@@ -44,6 +53,18 @@ func main() {
 	h, err := server.New(cfg)
 	if err != nil {
 		log.Fatalf("설정 오류: %v", err)
+	}
+	base := strings.TrimRight(baseURL, "/")
+	if cfg.ClientID != "" {
+		log.Printf("Google Cloud 의 OAuth 클라이언트에 승인된 리디렉션 URI 로 등록할 주소 두 개:\n    %s/auth/callback\n    %s/auth/owner/callback", base, base)
+		if cfg.FixtureDir == "" {
+			if _, err := os.Stat(filepath.Join(cfg.DataDir, "owner_token.json")); err != nil {
+				log.Printf("소유자 Google 연결이 아직 없습니다: %s 로 로그인한 뒤 %s/auth/owner 를 한 번 여세요", cfg.OwnerEmail, base)
+			}
+		}
+	}
+	if cfg.DevLogin {
+		log.Printf("DEV_LOGIN 이 켜져 있습니다 (localhost 전용, 이메일만으로 로그인): %s/auth/dev?email=%s", base, cfg.OwnerEmail)
 	}
 	srv := &http.Server{
 		Addr: ":" + env("PORT", "8080"), Handler: h,

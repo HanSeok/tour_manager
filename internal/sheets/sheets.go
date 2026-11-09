@@ -18,6 +18,9 @@ import (
 // ErrNoSheet means the tab does not exist.
 var ErrNoSheet = errors.New("sheet not found")
 
+// ErrNotConnected means the owner has not connected Google yet, so the spreadsheet cannot be reached.
+var ErrNotConnected = errors.New("소유자 Google 연결이 필요합니다 (소유자로 로그인한 뒤 /auth/owner 를 여세요)")
+
 // Source gives the rows of the settings and members tabs. A nil slice with a nil error is not used:
 // a missing tab is ErrNoSheet, an empty tab is an empty slice.
 type Source interface {

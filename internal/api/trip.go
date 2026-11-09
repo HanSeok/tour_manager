@@ -21,7 +21,9 @@ type Trip struct {
 	Members  *members.Directory
 	Expenses *expenses.Service
 	Version  string
-	CfgTTL   time.Duration // how long a read of the 설정 tab is reused (0 = read every time)
+	CfgTTL   time.Duration                            // how long a read of the 설정 tab is reused (0 = read every time)
+	Sample   bool                                     // development fixtures: the dashboard may show its sample calendar / places
+	Conn     func(ctx context.Context) (bool, string) // is the owner connected to Google? (for the diagnose screen)
 
 	mu    sync.Mutex
 	cfg   tripconfig.Config
@@ -32,6 +34,7 @@ type Trip struct {
 func (t *Trip) Register(rt *Router) {
 	rt.Register("bootstrap", PermRead, t.Bootstrap)
 	rt.Register("refresh", PermRead, t.Refresh)
+	rt.Register("diagnose", PermManage, t.Diagnose)
 	rt.Register("addExpense", PermWrite, t.AddExpense)
 	rt.Register("updateExpense", PermWrite, t.UpdateExpense)
 	rt.Register("deleteExpense", PermWrite, t.DeleteExpense)
@@ -72,10 +75,24 @@ func (t *Trip) ready(ctx context.Context) (tripconfig.Config, error) {
 }
 
 func (t *Trip) Bootstrap(ctx context.Context, who Principal, _ []json.RawMessage) (any, error) {
+	base := func(cfg tripconfig.Config) map[string]any {
+		return map[string]any{"config": cfg, "version": t.Version, "me": who, "members": t.Members.All(ctx)}
+	}
 	cfg, err := t.LoadConfig(ctx)
 	if err != nil {
 		log.Printf("bootstrap: settings: %v", err)
-		return nil, Errf(502, "설정 탭을 읽지 못했습니다. 소유자 Google 연결 상태를 확인하세요")
+		if who.Role.CanManage() { // the owner gets the setup screen with the reason, everyone else a plain error
+			out := base(tripconfig.Parse(nil, false))
+			out["checks"] = t.checks(ctx)
+			if errors.Is(err, sheets.ErrNotConnected) {
+				out["connect"] = "/auth/owner"
+			}
+			return out, nil
+		}
+		if errors.Is(err, sheets.ErrNotConnected) {
+			return nil, Errf(503, "소유자가 아직 Google 연결을 끝내지 않았습니다. 소유자에게 알려 주세요")
+		}
+		return nil, Errf(502, "설정 탭을 읽지 못했습니다. 소유자에게 알려 주세요")
 	}
 	list := []expenses.Expense{}
 	if cfg.Configured() {
@@ -87,18 +104,13 @@ func (t *Trip) Bootstrap(ctx context.Context, who Principal, _ []json.RawMessage
 		}
 	}
 	// Collections not ported yet stay empty; the shape matches what the dashboard already expects.
-	return map[string]any{
-		"config":   cfg,
-		"version":  t.Version,
-		"me":       who,
-		"members":  t.Members.All(ctx),
-		"events":   []any{},
-		"expenses": list,
-		"state":    map[string]any{},
-		"places":   nil,
-		"visits":   []any{},
-		"photos":   []any{},
-	}, nil
+	out := base(cfg)
+	out["events"], out["expenses"], out["state"], out["places"] = []any{}, list, map[string]any{}, nil
+	out["sample"], out["visits"], out["photos"] = t.Sample, []any{}, []any{}
+	if !cfg.Configured() && who.Role.CanManage() {
+		out["checks"] = t.checks(ctx)
+	}
+	return out, nil
 }
 
 func (t *Trip) Refresh(ctx context.Context, _ Principal, _ []json.RawMessage) (any, error) {

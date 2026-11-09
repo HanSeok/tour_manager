@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"net/url"
 	"strings"
@@ -104,9 +105,15 @@ func (g *Google) Callback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "로그인 요청이 올바르지 않습니다. 다시 시도하세요.", http.StatusBadRequest)
 		return
 	}
+	if e := r.URL.Query().Get("error"); e != "" { // the user declined, or Google refused (e.g. access_denied for a non-test user)
+		log.Printf("google sign-in: Google returned error=%q %q", e, r.URL.Query().Get("error_description"))
+		http.Error(w, "Google 로그인이 취소되었거나 거부되었습니다 ("+e+"). OAuth 동의 화면의 테스트 사용자에 이 계정이 있는지 확인하세요.", http.StatusUnauthorized)
+		return
+	}
 	ui, _, err := g.fetchUser(g.ctx(r), g.Client, r.URL.Query().Get("code"))
 	if err != nil || !ui.EmailVerified || ui.Email == "" {
-		http.Error(w, "Google 로그인에 실패했습니다.", http.StatusUnauthorized)
+		log.Printf("google sign-in failed: %v (email verified=%v, email present=%v)", err, ui.EmailVerified, ui.Email != "")
+		http.Error(w, "Google 로그인에 실패했습니다. 서버 로그에 원인이 있습니다 (클라이언트 ID/시크릿, 리디렉션 URI 확인).", http.StatusUnauthorized)
 		return
 	}
 	if _, ok := g.Dir.Lookup(r.Context(), ui.Email); !ok {
@@ -144,9 +151,15 @@ func (g *Google) OwnerCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "요청이 올바르지 않습니다. 다시 시도하세요.", http.StatusBadRequest)
 		return
 	}
+	if e := r.URL.Query().Get("error"); e != "" {
+		log.Printf("owner connect: Google returned error=%q %q", e, r.URL.Query().Get("error_description"))
+		http.Error(w, "Google 연결이 취소되었거나 거부되었습니다 ("+e+").", http.StatusBadGateway)
+		return
+	}
 	ui, tok, err := g.fetchUser(g.ctx(r), g.OwnerClient, r.URL.Query().Get("code"))
 	if err != nil {
-		http.Error(w, "Google 연결에 실패했습니다.", http.StatusBadGateway)
+		log.Printf("owner connect failed: %v", err)
+		http.Error(w, "Google 연결에 실패했습니다. 서버 로그에 원인이 있습니다.", http.StatusBadGateway)
 		return
 	}
 	email, _ := g.Signer.EmailFromRequest(r)

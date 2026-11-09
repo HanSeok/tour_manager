@@ -84,15 +84,13 @@ type ownerGrid struct {
 	client  *sheets.API
 }
 
-var errNotConnected = errors.New("소유자 Google 연결이 필요합니다 (소유자로 로그인한 뒤 /auth/owner 를 여세요)")
-
 func (o *ownerGrid) api() (*sheets.API, error) {
 	tok, err := o.tokens.Load()
 	if err != nil {
 		return nil, err
 	}
 	if tok == nil || tok.RefreshToken == "" {
-		return nil, errNotConnected
+		return nil, sheets.ErrNotConnected
 	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
@@ -103,6 +101,18 @@ func (o *ownerGrid) api() (*sheets.API, error) {
 		o.refresh = tok.RefreshToken
 	}
 	return o.client, nil
+}
+
+// status reports whether the owner has connected Google (for the diagnose screen).
+func (o *ownerGrid) status(context.Context) (bool, string) {
+	tok, err := o.tokens.Load()
+	switch {
+	case err != nil:
+		return false, "저장된 연결 정보를 읽지 못했습니다"
+	case tok == nil || tok.RefreshToken == "":
+		return false, "아직 연결되지 않았습니다. 소유자로 로그인한 뒤 /auth/owner 를 여세요"
+	}
+	return true, "연결됨"
 }
 
 func (o *ownerGrid) Rows(ctx context.Context, tab string) ([][]string, error) {
@@ -161,6 +171,9 @@ func New(cfg Config) (http.Handler, error) {
 	tokens := auth.FileTokenStore{Path: filepath.Join(cfg.DataDir, "owner_token.json")}
 
 	var grid sheets.Grid
+	conn := func(context.Context) (bool, string) {
+		return true, "개발용 샘플 시트 (메모리, 재시작하면 초기화)"
+	}
 	var ownerCfg *oauth2.Config
 	if cfg.ClientID != "" {
 		ownerCfg = auth.NewConfig(cfg.ClientID, cfg.ClientSecret, cfg.BaseURL, "/auth/owner/callback", []string{"openid", "email", scopeSheets})
@@ -172,7 +185,8 @@ func New(cfg Config) (http.Handler, error) {
 		}
 		grid = mem
 	} else {
-		grid = &ownerGrid{cfg: ownerCfg, tokens: tokens, spreadsheetID: cfg.SpreadsheetID}
+		og := &ownerGrid{cfg: ownerCfg, tokens: tokens, spreadsheetID: cfg.SpreadsheetID}
+		grid, conn = og, og.status
 	}
 	src := sheets.Source(grid)
 
@@ -204,7 +218,7 @@ func New(cfg Config) (http.Handler, error) {
 
 	rt := api.NewRouter(who, cfg.BaseURL)
 	(&api.Trip{
-		Grid: grid, Members: dir, Version: cfg.Version, CfgTTL: configTTL,
+		Grid: grid, Members: dir, Version: cfg.Version, CfgTTL: configTTL, Sample: cfg.FixtureDir != "", Conn: conn,
 		Expenses: &expenses.Service{Grid: grid, Log: &audit.GridLog{Grid: grid}},
 	}).Register(rt)
 
@@ -221,6 +235,12 @@ func New(cfg Config) (http.Handler, error) {
 		mux.HandleFunc("/auth/dev", g.DevLogin)
 	}
 	mux.Handle("/api/", rt)
+	// Tells the page it is served by this server (the static copy of this file says false).
+	mux.HandleFunc("/servermode.js", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte("window.TM_API = true;\n"))
+	})
 
 	files := http.FileServer(http.FS(cfg.Static))
 	loginPath := "/auth/login"

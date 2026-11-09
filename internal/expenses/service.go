@@ -179,10 +179,11 @@ func (s *Service) List(ctx context.Context, cfg tripconfig.Config) ([]Expense, e
 	if err != nil {
 		return nil, err
 	}
-	return parse(cfg, rows), nil
+	return Parse(cfg, rows), nil
 }
 
-func parse(cfg tripconfig.Config, rows [][]string) []Expense {
+// Parse reads expense rows (header first) the way the service does.
+func Parse(cfg tripconfig.Config, rows [][]string) []Expense {
 	out := []Expense{}
 	for i, r := range rows {
 		if i == 0 {

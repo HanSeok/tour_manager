@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -8,6 +9,12 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+	"time"
+
+	"tourmanager/internal/api"
+	"tourmanager/internal/expenses"
+	"tourmanager/internal/members"
+	"tourmanager/internal/sheets"
 )
 
 func devServer(t *testing.T) http.Handler {
@@ -136,7 +143,7 @@ func TestConfigValidation(t *testing.T) {
 	}
 }
 
-func TestWithoutOwnerConnectionBootstrapExplainsWhy(t *testing.T) {
+func TestWithoutOwnerConnectionTheOwnerGetsTheConnectScreen(t *testing.T) {
 	h, err := New(Config{BaseURL: "http://localhost:8080", OwnerEmail: "o@x.com", DataDir: t.TempDir(),
 		SessionSecret: []byte(strings.Repeat("s", 32)), ClientID: "id", ClientSecret: "s", SpreadsheetID: "sid",
 		Static: fstest.MapFS{"index.html": {Data: []byte("x")}}})
@@ -149,8 +156,10 @@ func TestWithoutOwnerConnectionBootstrapExplainsWhy(t *testing.T) {
 	signerCookie(t, rec, "o@x.com")
 	cookie.Value = rec.Result().Cookies()[0].Value
 	resp := do(h, "POST", "/api/bootstrap", `{"args":[]}`, []*http.Cookie{cookie})
-	if resp.Code != 502 || !strings.Contains(resp.Body.String(), "소유자 Google 연결") {
-		t.Errorf("want 502 with a hint, got %d %s", resp.Code, resp.Body.String())
+	// the owner is not sent to an error page: bootstrap answers with the setup screen's data and the link to connect
+	body := resp.Body.String()
+	if resp.Code != 200 || !strings.Contains(body, `"connect":"/auth/owner"`) || !strings.Contains(body, "연결되지 않았습니다") {
+		t.Errorf("want the setup data with a connect link, got %d %s", resp.Code, body)
 	}
 }
 
@@ -281,5 +290,38 @@ func TestExpenseCallsNeedAConfiguredTrip(t *testing.T) {
 	_ = json.Unmarshal(mustField(t, r, "config"), &cfg)
 	if code != 200 || len(cfg.Missing) == 0 {
 		t.Errorf("bootstrap still answers so the setup screen can show what is missing: %d %+v", code, cfg)
+	}
+}
+
+func TestServerModeScriptAndSampleFlag(t *testing.T) {
+	h := devServer(t)
+	rec := do(h, "GET", "/servermode.js", "", nil)
+	if rec.Code != 200 || !strings.Contains(rec.Body.String(), "TM_API = true") || !strings.Contains(rec.Header().Get("Content-Type"), "javascript") {
+		t.Errorf("the page learns it is served by this server from here: %d %q %q", rec.Code, rec.Header().Get("Content-Type"), rec.Body.String())
+	}
+	cookies := login(t, h, "dev-viewer@example.com")
+	_, r := call(t, h, cookies, "bootstrap", `[]`)
+	var sample bool
+	_ = json.Unmarshal(mustField(t, r, "sample"), &sample)
+	if !sample {
+		t.Error("dev fixtures must flag sample=true so the dashboard shows its sample calendar and places")
+	}
+}
+
+func TestRealSheetsBootstrapIsNotSample(t *testing.T) {
+	// a server wired to Google (no fixtures) must never ask the dashboard to show sample places
+	g := sheets.NewMemGrid(nil)
+	tr := &api.Trip{Grid: g, Members: members.NewDirectory("o@example.com", func(context.Context) ([][]string, error) { return nil, nil }, time.Minute),
+		Expenses: &expenses.Service{Grid: g}}
+	rt := api.NewRouter(func(*http.Request) (api.Principal, bool) {
+		return api.Principal{Email: "o@example.com", Name: "o", Role: members.Owner}, true
+	}, "")
+	tr.Register(rt)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/bootstrap", strings.NewReader(`{"args":[]}`))
+	req.Header.Set("Content-Type", "application/json")
+	rt.ServeHTTP(rec, req)
+	if !strings.Contains(rec.Body.String(), `"sample":false`) {
+		t.Errorf("sample must be false: %s", rec.Body.String())
 	}
 }
