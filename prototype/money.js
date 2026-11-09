@@ -36,7 +36,7 @@ function ledgerRows(ex) {
   return [...groups, ['여행 전 (사전 결제)', pre]].filter(([, rows]) => rows.length).map(([label, rows]) =>
     `<li class="day"><span>${label}</span><span>${local(sum(rows))}</span></li>` + rows.slice().reverse().map((e) =>
       `<li class="${e.id === state.editing ? 'editing' : ''}"><span class="tag">${esc(e.category)}</span>
-        <button type="button" class="exp-item" data-exp-edit="${esc(e.id)}" ${e.pending ? 'disabled' : ''}>${esc(e.item)}<small>${esc(e.payer)} · ${esc(e.method)}${e.pending ? ' · <b class="wait">⏳ 전송 대기</b>' : ''}</small></button>
+        <button type="button" class="exp-item" data-exp-edit="${esc(e.id)}" ${e.pending ? 'disabled' : ''}>${esc(e.item)}<small>${esc(e.payer)} · ${esc(e.method)}${authorNote(e)}${e.pending ? ' · <b class="wait">⏳ 전송 대기</b>' : ''}</small></button>
         <span class="amt">${local(e.amount)}${e.currency === 'home' ? `<small>${homeFmt(homeOf(e))} 입력</small>` : ''}</span>
         <span class="ctrl edit-only"><button data-exp-del="${esc(e.id)}" aria-label="삭제" ${e.pending ? 'disabled' : ''}>✕</button></span></li>`).join('')).join('');
 }
@@ -100,7 +100,7 @@ function addExpense(e) {
   if (!entry) return setState({ error: `금액을 0보다 큰 숫자${draftDecimals(state.draft) ? `(소수 ${draftDecimals(state.draft)}자리까지)` : ''}로 입력하세요` });
   if (state.editing) return updateExpense(state.editing, entry);
   const row = { ...entry, id: newId(), home: entry.currency === 'home' ? entry.amount : homeOf({ amount: entry.amount }) };
-  if (!IS_GAS) {
+  if (!IS_SERVER) {
     const stored = entry.currency === 'home' ? { ...row, amount: entry.amount / CFG.rate } : row;
     return setState({ expenses: [...state.expenses, stored], draft: clearedDraft(), error: '' });
   }
@@ -109,7 +109,7 @@ function addExpense(e) {
     .then((list) => setState({ expenses: list, draft: clearedDraft(), saving: false }))
     .catch((err) => (isNetworkError(err)
       ? setState({ outbox: [...state.outbox, queuedRow(row)], draft: clearedDraft(), saving: false, error: '오프라인: 연결되면 자동으로 보냅니다' })
-      : setState({ error: `저장 실패: ${err.message}`, saving: false })));
+      : writeFailed('저장 실패', err, { saving: false })));
 }
 
 // Queued rows show the local amount even when typed in the home currency.
@@ -118,7 +118,7 @@ const queuedRow = (row) => (row.currency === 'home' ? { ...row, amount: row.amou
 let isFlushing = false;
 /** Sends queued expenses one by one. The client UUID makes a retry after a lost response harmless. */
 function flushOutbox() {
-  if (!IS_GAS || isFlushing || !state.outbox.length || !isEditable()) return;
+  if (!IS_SERVER || isFlushing || !state.outbox.length || !isEditable()) return;
   isFlushing = true;
   const [first] = state.outbox;
   const { sendAmount, ...row } = first;
@@ -148,23 +148,34 @@ function startEdit(id) {
   });
 }
 
+/** A failed write: 409 (someone edited it first) refreshes the list and keeps the user's edit; 401 asks for a new sign-in. */
+function writeFailed(label, err, extra = {}) {
+  if (err.status === 409) { reloadExpenses(); return setState({ ...extra, error: `${label}: ${err.message}` }); }
+  if (err.status === 401) return setState({ ...extra, error: '로그인이 만료되었습니다. 페이지를 새로고침하세요' });
+  return setState({ ...extra, error: `${label}: ${err.message}` });
+}
+
+/** Go server: the editor passes back the version they saw (updatedAt) so a concurrent edit is caught instead of overwritten. */
+const baseArg = (id) => { const cur = state.expenses.find((x) => String(x.id) === String(id)); return IS_API && cur && cur.updatedAt !== undefined ? [cur.updatedAt] : []; };
+const authorNote = (e) => (IS_API && e.createdBy ? ` · ✍ ${esc(whoName(e.createdBy))}${e.updatedBy && e.updatedBy !== e.createdBy ? ` (수정 ${esc(whoName(e.updatedBy))})` : ''}` : '');
+
 function updateExpense(id, entry) {
   const done = { editing: '', draft: clearedDraft(), saving: false, error: '' };
-  if (!IS_GAS) {
+  if (!IS_SERVER) {
     const amount = entry.currency === 'home' ? entry.amount / CFG.rate : entry.amount;
     const home = entry.currency === 'home' ? entry.amount : homeOf({ amount: entry.amount });
     return setState({ ...done, expenses: state.expenses.map((x) => (x.id === id ? { ...x, ...entry, amount, home } : x)) });
   }
   setState({ saving: true, error: '' });
-  callWrite('updateExpense', id, entry)
+  callWrite('updateExpense', id, entry, ...baseArg(id))
     .then((list) => setState({ ...done, expenses: list }))
-    .catch((err) => setState({ error: `수정 실패: ${err.message}`, saving: false }));
+    .catch((err) => writeFailed('수정 실패', err, { saving: false }));
 }
 
 function deleteExpense(id) {
   if (!isEditable() || !confirm('이 지출을 삭제할까요?')) return;
-  if (!IS_GAS) return setState({ expenses: state.expenses.filter((x) => String(x.id) !== id) });
-  callWrite('deleteExpense', id)
+  if (!IS_SERVER) return setState({ expenses: state.expenses.filter((x) => String(x.id) !== id) });
+  callWrite('deleteExpense', id, ...baseArg(id))
     .then((list) => setState({ expenses: list }))
-    .catch((err) => setState({ error: `삭제 실패: ${err.message}` }));
+    .catch((err) => writeFailed('삭제 실패', err));
 }

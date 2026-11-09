@@ -1,8 +1,19 @@
-// Bridge to the Apps Script server. In the local prototype (no google.script.run) everything stays local.
+// Bridge to the server. Three modes: Apps Script (google.script.run), the Go server (fetch /api, `TM_API`), or the
+// local prototype (no server: everything stays in the browser).
 const IS_GAS = typeof google !== 'undefined' && Boolean(google.script && google.script.run);
+const IS_API = !IS_GAS && typeof window !== 'undefined' && window.TM_API === true;
+const IS_SERVER = IS_GAS || IS_API; // expenses live on a server
 // Injected by doGet (Apps Script only): {required, key}. No key required → everyone with the link edits (v1 behaviour).
 const ACCESS = (typeof window !== 'undefined' && window.EDIT_ACCESS) || { required: false, key: '' };
-const CAN_EDIT = !ACCESS.required || Boolean(ACCESS.key);
+// Go server: set from `me.role` after bootstrap (read-only until we know who is signed in).
+let CAN_EDIT = IS_API ? false : (!ACCESS.required || Boolean(ACCESS.key));
+let ME = null; // Go server: {email, name, role}
+let MEMBERS = {}; // Go server: lower-case e-mail → {name, role}
+const ROLE_LABEL = { owner: '소유자', editor: '편집자', viewer: '보기' };
+const whoName = (email) => {
+  const m = MEMBERS[String(email || '').toLowerCase()];
+  return m ? m.name : String(email || '').split('@')[0];
+};
 const SYNC_KEYS = ['routes', 'starts', 'startFrom', 'eventPlace'];
 const SYNC_DELAY_MS = 400;
 const TRAVEL_BATCH = 25;
@@ -10,14 +21,31 @@ const TRAFFIC_BUCKET_MIN = 60; // traffic-aware times are looked up per departur
 const MODE_SUFFIX = { driving: '', transit: '!t', walking: '!w' }; // must match apps-script/Maps.js
 
 function callServer(fn, ...args) {
+  if (IS_API) return callApi(fn, args);
   return new Promise((resolve, reject) => {
     google.script.run
       .withSuccessHandler(resolve)
       .withFailureHandler((e) => reject(new Error(e && e.message ? e.message : String(e))))[fn](...args);
   });
 }
-/** Every server write goes through here: the edit key is always the last argument. */
-const callWrite = (fn, ...args) => callServer(fn, ...args, ACCESS.key);
+
+/** Go server: POST /api/<fn> {args} → {ok, data} | {ok:false, error}. The error carries the HTTP status (409 = conflict). */
+async function callApi(fn, args) {
+  let res;
+  try {
+    res = await fetch(`/api/${fn}`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, credentials: 'same-origin', body: JSON.stringify({ args }) });
+  } catch (e) { throw new Error('Failed to fetch'); } // offline → isNetworkError() queues the write
+  let body = null;
+  try { body = await res.json(); } catch (e) { /* not JSON */ }
+  if (!res.ok || !body || !body.ok) {
+    const err = new Error((body && body.error) || `HTTP ${res.status}`);
+    err.status = res.status;
+    throw err;
+  }
+  return body.data;
+}
+/** Every server write goes through here. Apps Script: the edit key is always the last argument. Go server: the session decides. */
+const callWrite = (fn, ...args) => (IS_API ? callServer(fn, ...args) : callServer(fn, ...args, ACCESS.key));
 const isNetworkError = (err) => (typeof navigator !== 'undefined' && navigator.onLine === false)
   || /network|HTTP 0|connection|timed? ?out|Failed to fetch/i.test(String(err && err.message));
 

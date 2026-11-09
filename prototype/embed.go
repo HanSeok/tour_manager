@@ -4,5 +4,5 @@ package prototype
 
 import "embed"
 
-//go:embed index.html app.js data.js hours.js money.js remote.js route.js slots.js schedule.js settle.js timeline.js
+//go:embed index.html app.js data.js hours.js money.js remote.js route.js servermode.js slots.js schedule.js settle.js timeline.js
 var Files embed.FS

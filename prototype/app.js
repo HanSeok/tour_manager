@@ -65,7 +65,7 @@ const todayTrip = () => {
 };
 const PERSISTED = ['routes', 'starts', 'startFrom', 'expenses', 'eventPlace', 'calendarAdds', 'draft', 'outbox', 'visits'];
 const EMPTY_DRAFT = { amount: '', category: '식비', item: '', payer: '', method: '', date: '', currency: 'local' };
-const PERSISTED_DEFAULT = { expenses: IS_GAS ? [] : SEED_EXPENSES, outbox: [], draft: EMPTY_DRAFT, visits: [] };
+const PERSISTED_DEFAULT = { expenses: IS_SERVER ? [] : SEED_EXPENSES, outbox: [], draft: EMPTY_DRAFT, visits: [] };
 let state = {
   tab: 'route', date: '', layer: '전체', error: '',
   ...Object.fromEntries(PERSISTED.map((k) => [k, store.get(k, k in PERSISTED_DEFAULT ? PERSISTED_DEFAULT[k] : {})])),
@@ -457,6 +457,8 @@ function placeSelect(e) {
     <option value="">📍 장소 연결 안 됨</option>${PLACES.map((p) => `<option value="${esc(p.id)}" ${p.id === cur ? 'selected' : ''}>📍 ${esc(p.name)}</option>`).join('')}</select>`;
 }
 
+// Apps Script: anyone; Go server: the owner (the checks can contain Google's error text)
+const canDiagnose = () => IS_GAS || (IS_API && Boolean(ME) && ME.role === 'owner');
 const REG_TEXT = { none: '동선 미등록', changed: '동선 변경됨 · 재등록 필요', synced: '동선 캘린더 등록됨', empty: '동선 없음' };
 
 function renderPlan() {
@@ -473,7 +475,7 @@ function renderPlan() {
     return `<article class="daycard"><header><b>Day ${i + 1}</b> · ${md(d)} (${WD[weekday(d)]})</header><ul>${items}${pending}</ul>
       <footer><span class="st-${st}">${REG_TEXT[st]}</span><button class="link" data-goto="${d}">동선 →</button></footer></article>`;
   }).join('') + `<p class="footnote">일정 = Google 캘린더${IS_GAS ? '' : ' (예시)'}. 여기서 연결한 장소는 대시보드에만 공유 저장되고 캘린더 일정은 바뀌지 않습니다.</p>
-    ${IS_GAS ? `<p class="footnote"><button class="mini" data-diagnose="1">⚙ 설정 점검</button></p>${checksList(state.checks)}` : ''}`;
+    ${canDiagnose() ? `<p class="footnote"><button class="mini" data-diagnose="1">⚙ 설정 점검</button></p>${checksList(state.checks)}` : ''}`;
 }
 
 const CHECK_MARK = { true: '✅', false: '❌', null: '➖' };
@@ -484,7 +486,7 @@ function checksList(checks) {
 
 /* ---------- timeline tab (places + payments + photos, by day) ---------- */
 const phaseNow = () => Timeline.phaseOf(todayTrip(), CFG.start, CFG.end);
-const allPhotos = () => (IS_GAS ? [] : SAMPLE_PHOTOS); // Apps Script mode has no photo store yet
+const allPhotos = () => (IS_SERVER ? [] : SAMPLE_PHOTOS); // no photo store on any server yet
 
 function timelineItems() {
   const stops = DATES.flatMap((date) => {
@@ -516,7 +518,7 @@ const PHASE_BANNER = {
 function entryHtml(e) {
   const t = e.min == null ? '' : fmt(e.min % 1440);
   if (e.kind === 'place') return `<li class="${e.muted ? 'muted' : ''}"><time>${t}</time><span class="tl-ico">${e.icon}</span><span>${esc(e.name)}</span></li>`;
-  if (e.kind === 'expense') return `<li><time>${t}</time><span class="tl-ico">💳</span><span><span class="amt">${local(e.amount)}</span>${esc(e.item)}<small>${esc(e.category)} · ${esc(e.payer)} · ${esc(e.method)}</small></span></li>`;
+  if (e.kind === 'expense') return `<li><time>${t}</time><span class="tl-ico">💳</span><span><span class="amt">${local(e.amount)}</span>${esc(e.item)}<small>${esc(e.category)} · ${esc(e.payer)} · ${esc(e.method)}${authorNote(e)}</small></span></li>`;
   return `<li><time>${t}</time><span class="tl-ico">📷</span><span><div class="tl-photos"><div class="tl-photo" style="--tone:${esc(e.tone || '#ccc')}"><span>📷</span>${esc(e.caption || '')}</div></div></span></li>`;
 }
 
@@ -542,7 +544,8 @@ function renderHeader() {
   $('#spentKrw').textContent = `≈ ${homeFmt(ex.reduce((a, e) => a + homeOf(e), 0))} · ${CFG.localSymbol}1 = ${CFG.homeSymbol}${CFG.rate}`;
   $('#roNote').hidden = isEditable();
   $('#roNote').textContent = state.bootFailed ? '서버에 연결하지 못해 지난번 데이터를 보여 줍니다 (읽기 전용) · 연결되면 새로고침하세요'
-    : state.isStale ? '지난번 데이터 표시 중 · 새로 불러오는 중…' : '보기 전용 링크 · 편집하려면 편집 링크로 여세요';
+    : state.isStale ? '지난번 데이터 표시 중 · 새로 불러오는 중…'
+      : IS_API ? '보기 권한 계정입니다 · 편집하려면 소유자에게 편집자 권한을 요청하세요' : '보기 전용 링크 · 편집하려면 편집 링크로 여세요';
 }
 
 function render() {
@@ -696,14 +699,18 @@ function runDiagnose() {
   callServer('diagnose').then((checks) => setState({ checks })).catch((e) => showError(`점검 실패: ${e.message}`));
 }
 
-function showSetup(cfg, checks) {
-  const items = [...cfg.missing.map((m) => `<li><b>${esc(m)}</b> 값이 비어 있습니다</li>`), ...cfg.invalid.map((m) => `<li>${esc(m)}</li>`)].join('');
-  showBanner('설정이 필요합니다');
+function showSetup(cfg, checks, connect) {
+  // `connect` (Go server): the owner has not linked Google yet, so listing empty settings would only mislead
+  const items = connect ? '' : [...cfg.missing.map((m) => `<li><b>${esc(m)}</b> 값이 비어 있습니다</li>`), ...cfg.invalid.map((m) => `<li>${esc(m)}</li>`)].join('');
+  showBanner(connect ? 'Google 연결이 필요합니다' : '설정이 필요합니다');
+  const how = IS_API
+    ? '<p>소유자 Google 계정의 스프레드시트 <b>설정</b> 탭을 채운 뒤 이 페이지를 새로고침하세요. 템플릿 사본을 쓰면 설정 탭이 이미 있습니다.</p>'
+    : '<p>스프레드시트의 <b>설정</b> 탭을 채운 뒤 이 페이지를 새로고침하세요. 설정 탭이 없으면 스프레드시트 메뉴 <b>여행 대시보드 → 설정·안내 탭 만들기</b>를 누르세요.</p>';
   $('.layout').innerHTML = `<section class="setup"><h2>처음 설정</h2>
-    <p>스프레드시트의 <b>설정</b> 탭을 채운 뒤 이 페이지를 새로고침하세요. 설정 탭이 없으면 스프레드시트 메뉴 <b>여행 대시보드 → 설정·안내 탭 만들기</b>를 누르세요.</p>
+    ${connect ? `<p>이 서버가 소유자의 Google 스프레드시트를 읽고 쓰려면 소유자가 한 번 연결해야 합니다.</p><p><a class="link" href="${esc(connect)}" style="text-decoration:none;display:inline-block">Google 연결하기 →</a></p>` : how}
     <ul>${items}</ul>
     ${checks ? `<h2>자가 점검</h2>${checksList(checks)}` : ''}
-    <p>자세한 안내: 스프레드시트의 <b>안내</b> 탭</p></section>`;
+    ${IS_API ? '' : '<p>자세한 안내: 스프레드시트의 <b>안내</b> 탭</p>'}</section>`;
 }
 
 // placeList: app-shaped places (prototype passes samples; Apps Script converts My Maps placemarks).
@@ -727,7 +734,9 @@ function startApp(res, placeList, { isStale = false } = {}) {
   const v = res.version;
   const update = v && v.latest && v.latest !== v.current
     ? ` · <a href="${UPDATE_GUIDE_URL}" target="_blank" rel="noopener">새 버전 ${esc(v.latest)} 있음 (지금 ${esc(v.current)}) → 업데이트 방법</a>` : '';
-  const parts = [isStale ? '지난번 데이터' : `캘린더 일정 ${res.events.length}개`, placeNote, ...airportNote, ...(mm.notes || []), CAN_EDIT ? '동선은 모두에게 공유 저장' : '보기 전용'];
+  const parts = IS_API
+    ? [`${ME.name} (${ROLE_LABEL[ME.role]})`, res.sample ? '일정·장소는 샘플(개발용)' : '일정·장소 연동은 준비 중', '지출은 서버에 저장 · 동선은 이 브라우저에만 저장', ...(CAN_EDIT ? [] : ['보기 전용'])]
+    : [isStale ? '지난번 데이터' : `캘린더 일정 ${res.events.length}개`, placeNote, ...airportNote, ...(mm.notes || []), CAN_EDIT ? '동선은 모두에게 공유 저장' : '보기 전용'];
   showBanner(parts.map(esc).join(' · ') + update);
   render();
   dirty.forEach((k) => syncState(k, state[k])); // only the difference to the server is sent
@@ -741,8 +750,17 @@ function adoptShared(key, value) {
 }
 
 /** Companions' changes: re-read on return to the tab and every few minutes. Keys with a pending save stay local. */
+/** Go server: only the expenses come from the server for now (routes, events and places stay in this browser). */
+function refreshExpenses() {
+  return callServer('refresh')
+    .then((res) => { state = { ...state, expenses: state.saving ? state.expenses : res.expenses }; render(); })
+    .catch((e) => console.warn(`refresh failed: ${e.message}`));
+}
+const reloadExpenses = () => refreshExpenses();
+
 function refreshShared() {
-  if (!IS_GAS || state.isStale || document.hidden) return;
+  if (!IS_SERVER || state.isStale || document.hidden) return;
+  if (IS_API) { refreshExpenses(); return; }
   callServer('refresh').then((res) => {
     const remote = res.state || {};
     // in-flight keys wait for their own response; every other key = server value + this page's unsent edits (rebase)
@@ -766,10 +784,18 @@ function boot(retriesLeft) {
       if (cfg.missing.length || cfg.invalid.length) {
         state = { ...state, isStale: false };
         $('#roNote').hidden = true;
-        return showSetup(cfg, res.checks);
+        return showSetup(cfg, res.checks, res.connect);
       }
-      store.set(BOOT_CACHE, res);
-      startApp(res);
+      if (IS_API) {
+        ME = res.me;
+        CAN_EDIT = ME.role !== 'viewer';
+        MEMBERS = Object.fromEntries((res.members || []).map((x) => [String(x.email).toLowerCase(), x]));
+        // the dev server (fixtures) has no calendar / My Maps yet: show the sample day so the whole screen can be tried
+        startApp(res.sample ? { ...res, events: MOCK_RAW_EVENTS } : res, res.sample ? SAMPLE_PLACES : null);
+      } else {
+        store.set(BOOT_CACHE, res);
+        startApp(res);
+      }
       flushOutbox();
       setInterval(refreshShared, REFRESH_MS);
       document.addEventListener('visibilitychange', refreshShared);
@@ -789,8 +815,8 @@ function bootCache() {
 }
 
 travelCache = store.get('travel', {});
-if (IS_GAS) {
-  const cached = bootCache();
+if (IS_SERVER) {
+  const cached = IS_GAS ? bootCache() : null;
   if (cached) {
     try { startApp(cached, null, { isStale: true }); } catch (e) { console.warn(`cached view skipped: ${e.message}`); }
   } else {
