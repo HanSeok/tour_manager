@@ -35,6 +35,7 @@ func (t *Trip) Register(rt *Router) {
 	rt.Register("bootstrap", PermRead, t.Bootstrap)
 	rt.Register("refresh", PermRead, t.Refresh)
 	rt.Register("diagnose", PermManage, t.Diagnose)
+	rt.Register("setupSettings", PermManage, t.SetupSettings)
 	rt.Register("addExpense", PermWrite, t.AddExpense)
 	rt.Register("updateExpense", PermWrite, t.UpdateExpense)
 	rt.Register("deleteExpense", PermWrite, t.DeleteExpense)
@@ -47,7 +48,7 @@ func (t *Trip) LoadConfig(ctx context.Context) (tripconfig.Config, error) {
 	if t.cfgOK && t.CfgTTL > 0 && time.Since(t.cfgAt) < t.CfgTTL {
 		return t.cfg, nil
 	}
-	rows, err := t.Grid.Rows(ctx, tripconfig.SheetName)
+	rows, err := t.Grid.RawRows(ctx, tripconfig.SheetName)
 	var cfg tripconfig.Config
 	switch {
 	case errors.Is(err, sheets.ErrNoSheet):

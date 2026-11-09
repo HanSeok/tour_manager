@@ -306,3 +306,36 @@ func TestMissingExpenseTabIsCreatedOnFirstUse(t *testing.T) {
 		t.Errorf("%v %v", list, err)
 	}
 }
+
+// The version a client sends back (updatedAt) must change on EVERY write. With a clock that has not moved (two writes in
+// the same millisecond) a timestamp alone would repeat, and a stale edit or delete would slip through unnoticed.
+func TestEveryWriteChangesTheVersionEvenWhenTheClockStandsStill(t *testing.T) {
+	g := sheets.NewMemGrid(nil)
+	frozen := time.Date(2027, 4, 11, 5, 5, 0, 0, time.UTC)
+	s := &Service{Grid: g, Now: func() time.Time { return frozen }}
+	c := cfgOf(nil)
+	ctx := context.Background()
+	added, err := s.Add(ctx, c, "a@x.com", in(func(i *Input) { i.ID = uid1 }))
+	if err != nil {
+		t.Fatal(err)
+	}
+	v1 := added[0].UpdatedAt
+	list, err := s.Update(ctx, c, "b@x.com", uid1, in(func(i *Input) { i.Amount = 2.0 }), &v1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	v2 := list[0].UpdatedAt
+	if v2 == v1 || v2 < v1 {
+		t.Fatalf("the version must move forward even in the same millisecond: %q then %q", v1, v2)
+	}
+	var ce *Error
+	if _, err = s.Delete(ctx, c, "a@x.com", uid1, &v1); !errors.As(err, &ce) || ce.Kind != Conflict {
+		t.Fatalf("a delete holding the first version must conflict, got %v", err)
+	}
+	if _, err = s.Update(ctx, c, "a@x.com", uid1, in(func(i *Input) { i.Amount = 3.0 }), &v1); !errors.As(err, &ce) || ce.Kind != Conflict {
+		t.Fatalf("an edit holding the first version must conflict, got %v", err)
+	}
+	if list, err = s.Update(ctx, c, "a@x.com", uid1, in(func(i *Input) { i.Amount = 3.0 }), &v2); err != nil || list[0].UpdatedAt <= v2 {
+		t.Fatalf("holding the current version works and moves it again: %v %v", list, err)
+	}
+}

@@ -129,3 +129,45 @@ func TestBootstrapOfAnIncompleteTripIncludesChecksForTheOwnerOnly(t *testing.T) 
 		t.Error("editors must not receive the owner's checklist")
 	}
 }
+
+func TestSetupSettingsCreatesTheTabOnABlankSheetAndNeverTouchesExistingOnes(t *testing.T) {
+	g := sheets.NewMemGrid(nil)
+	owner := routerFor(members.Owner, g, nil)
+	code, out := call(owner, "setupSettings", `{"args":[]}`, nil)
+	if code != 200 || out["data"].(map[string]any)["created"] != float64(22) {
+		t.Fatalf("%d %v", code, out)
+	}
+	rows, err := g.Rows(context.Background(), "설정")
+	if err != nil || len(rows) != 23 || rows[0][0] != "항목" || rows[1][0] != "여행 제목" || !strings.HasPrefix(rows[1][2], "[필수]") {
+		t.Fatalf("%v %v", len(rows), err)
+	}
+	// it is a real starting point: bootstrap now lists exactly what the owner still has to fill in
+	_, boot := call(owner, "bootstrap", `{"args":[]}`, nil)
+	missing := boot["data"].(map[string]any)["config"].(map[string]any)["missing"].([]any)
+	if len(missing) == 0 || missing[0] == "설정 탭" {
+		t.Errorf("after creating the tab the missing list names settings, not the tab: %v", missing)
+	}
+	// a second call (or a tab that already holds settings) is refused and nothing is overwritten
+	if err := g.UpdateRow(context.Background(), "설정", 2, []any{"여행 제목", "내 여행", "[필수] x"}); err != nil {
+		t.Fatal(err)
+	}
+	if code, out = call(owner, "setupSettings", `{"args":[]}`, nil); code != 409 {
+		t.Fatalf("existing settings must be protected: %d %v", code, out)
+	}
+	if rows, _ = g.Rows(context.Background(), "설정"); rows[1][1] != "내 여행" || len(rows) != 23 {
+		t.Errorf("settings were modified: %v", rows[1])
+	}
+	if code, _ = call(routerFor(members.Editor, g, nil), "setupSettings", `{"args":[]}`, nil); code != 403 {
+		t.Errorf("owner only: %d", code)
+	}
+}
+
+func TestSetupSettingsFillsATabThatOnlyHasAHeader(t *testing.T) {
+	g := sheets.NewMemGrid(map[string][][]string{"설정": {{"항목", "값", "설명"}}})
+	if code, out := call(routerFor(members.Owner, g, nil), "setupSettings", `{"args":[]}`, nil); code != 200 {
+		t.Fatalf("%d %v", code, out)
+	}
+	if rows, _ := g.Rows(context.Background(), "설정"); len(rows) != 23 || rows[0][1] != "값" {
+		t.Errorf("header kept once, settings appended: %d rows", len(rows))
+	}
+}

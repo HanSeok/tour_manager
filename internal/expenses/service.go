@@ -301,7 +301,15 @@ func (s *Service) Update(ctx context.Context, cfg tripconfig.Config, who, id str
 	if createdBy == "" {
 		createdBy = who
 	}
-	row := toRow(c, id, before.Time, createdBy, who, stamp(s.now()))
+	// The version must change on every write: two writes in the same millisecond (or a clock that stepped back) would
+	// otherwise repeat it, and a stale edit holding the old value would pass the conflict check.
+	at := stamp(s.now())
+	if before.UpdatedAt != "" && at <= before.UpdatedAt { // fixed-width ISO text: string order is time order
+		if prev, perr := time.Parse("2006-01-02T15:04:05.000Z", before.UpdatedAt); perr == nil {
+			at = stamp(prev.Add(time.Millisecond))
+		}
+	}
+	row := toRow(c, id, before.Time, createdBy, who, at)
 	if err := s.Grid.UpdateRow(ctx, cfg.ExpenseSheet, n, row); err != nil {
 		return nil, err
 	}

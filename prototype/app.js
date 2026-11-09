@@ -558,6 +558,7 @@ function render() {
 }
 
 function handleButton(ds) {
+  if (ds.setupSettings) return runSetupSettings();
   if (ds.tab) return setState({ tab: ds.tab, tabChosen: true });
   if (ds.date) return setState({ date: ds.date });
   if (ds.goto) return setState({ tab: 'route', date: ds.goto });
@@ -699,6 +700,15 @@ function runDiagnose() {
   callServer('diagnose').then((checks) => setState({ checks })).catch((e) => showError(`점검 실패: ${e.message}`));
 }
 
+// Go server: a sheet without a 설정 tab can be started from the dashboard (owner only)
+const canCreateSettings = (cfg, connect) => IS_API && !connect && Boolean(ME) && ME.role === 'owner' && cfg.missing.includes('설정 탭');
+
+function runSetupSettings() {
+  callServer('setupSettings')
+    .then(() => location.reload())
+    .catch((e) => showError(`설정 탭을 만들지 못했습니다: ${e.message}`));
+}
+
 function showSetup(cfg, checks, connect) {
   // `connect` (Go server): the owner has not linked Google yet, so listing empty settings would only mislead
   const items = connect ? '' : [...cfg.missing.map((m) => `<li><b>${esc(m)}</b> 값이 비어 있습니다</li>`), ...cfg.invalid.map((m) => `<li>${esc(m)}</li>`)].join('');
@@ -707,6 +717,7 @@ function showSetup(cfg, checks, connect) {
     ? '<p>소유자 Google 계정의 스프레드시트 <b>설정</b> 탭을 채운 뒤 이 페이지를 새로고침하세요. 템플릿 사본을 쓰면 설정 탭이 이미 있습니다.</p>'
     : '<p>스프레드시트의 <b>설정</b> 탭을 채운 뒤 이 페이지를 새로고침하세요. 설정 탭이 없으면 스프레드시트 메뉴 <b>여행 대시보드 → 설정·안내 탭 만들기</b>를 누르세요.</p>';
   $('.layout').innerHTML = `<section class="setup"><h2>처음 설정</h2>
+    ${canCreateSettings(cfg, connect) ? '<p><button class="submit" data-setup-settings="1">설정 탭 자동으로 만들기</button></p><p class="regnote">빈 스프레드시트에 \'설정\' 탭을 만들고 모든 항목을 채울 칸으로 넣습니다. 만든 뒤 [필수] 칸을 채우고 새로고침하세요.</p>' : ''}
     ${connect ? `<p>이 서버가 소유자의 Google 스프레드시트를 읽고 쓰려면 소유자가 한 번 연결해야 합니다.</p><p><a class="link" href="${esc(connect)}" style="text-decoration:none;display:inline-block">Google 연결하기 →</a></p>` : how}
     <ul>${items}</ul>
     ${checks ? `<h2>자가 점검</h2>${checksList(checks)}` : ''}
@@ -782,6 +793,7 @@ function boot(retriesLeft) {
     .then((res) => {
       const cfg = res.config;
       if (cfg.missing.length || cfg.invalid.length) {
+        if (IS_API) ME = res.me; // the setup screen offers owner-only actions
         state = { ...state, isStale: false };
         $('#roNote').hidden = true;
         return showSetup(cfg, res.checks, res.connect);

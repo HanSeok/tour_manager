@@ -3,6 +3,7 @@
 package tripconfig
 
 import (
+	"fmt"
 	"math"
 	"regexp"
 	"strconv"
@@ -120,7 +121,26 @@ func Parse(rows [][]string, hasSheet bool) Config {
 			raw[f.key] = f.def
 		}
 	}
+	// A date or time typed into the sheet may have been turned into a number (see serialDate / serialTime).
+	raw["start"], raw["end"], raw["defaultStart"] = serialDate(raw["start"]), serialDate(raw["end"]), serialTime(raw["defaultStart"])
 	return validate(raw, hasSheet)
+}
+
+// Sheets turns a typed date into a day number (days since 1899-12-30) and a typed time into a fraction of a day;
+// the settings are read unformatted, so both are put back into the text the user meant. Real text passes through.
+func serialDate(s string) string {
+	if f, ok := jsNumber(s); ok && strings.TrimSpace(s) != "" && f > 20000 && f < 80000 {
+		return time.Date(1899, 12, 30, 0, 0, 0, 0, time.UTC).AddDate(0, 0, int(f)).Format("2006-01-02")
+	}
+	return s
+}
+
+func serialTime(s string) string {
+	if f, ok := jsNumber(s); ok && strings.TrimSpace(s) != "" && f >= 0 && f < 1 {
+		m := int(f*1440 + 0.5)
+		return fmt.Sprintf("%02d:%02d", m/60%24, m%60)
+	}
+	return s
 }
 
 // IsRealDate reports whether s is an existing YYYY-MM-DD date (2027-02-30 is not).
@@ -319,4 +339,43 @@ func isTileURL(u string) bool {
 		}
 	}
 	return true
+}
+
+// descriptions are the 설명 column of the template (Config.js CONFIG_FIELDS).
+var descriptions = map[string]string{
+	"title":            "화면 상단 제목. 예: 오키나와 여행",
+	"start":            "YYYY-MM-DD. 예: 2027-04-10",
+	"end":              "YYYY-MM-DD. 예: 2027-04-14",
+	"timezone":         "IANA 시간대. 예: Asia/Tokyo, Asia/Bangkok, Europe/Paris, America/Los_Angeles",
+	"destKeywords":     "쉼표로 구분. 항공편 일정 제목의 → 오른쪽에 있으면 도착편, 왼쪽이면 출국편. Gmail 자동 일정(Flight to Naha)도 인식하도록 영문 지명도 넣으세요. 예: 오키나와, 나하, Naha, OKA",
+	"myMapsUrl":        "My Maps 지도 주소 (공유: 링크가 있는 모든 사용자 보기). 예: https://www.google.com/maps/d/edit?mid=...",
+	"localCurrency":    "예: 엔, 바트, 유로",
+	"localSymbol":      "예: ¥, ฿, €",
+	"homeSymbol":       "합계를 환산해 보여줄 통화 기호",
+	"rate":             "현지 통화 1 = 환산 통화 얼마. 예: 9.3 또는 =GOOGLEFINANCE(\"CURRENCY:JPYKRW\") (자동)",
+	"payers":           "쉼표로 구분",
+	"methods":          "쉼표로 구분",
+	"expenseSheet":     "이 이름의 탭에 지출이 기록됩니다 (없으면 자동 생성)",
+	"subtitle":         "제목 옆 짧은 메모. 예: 렌터카",
+	"arrivalBufferMin": "도착편 착륙 후 출발까지 걸리는 시간",
+	"flightLeadMin":    "출국편 출발 몇 분 전까지 공항에 도착할지",
+	"defaultStart":     "숙소에서 출발하는 날의 기본 시각 (HH:MM)",
+	"travelMode":       "자동차 / 대중교통 / 도보 중 하나. 이동시간과 길찾기 링크에 쓰입니다",
+	"currencyDecimals": "0~2. 유로·달러처럼 센트가 있으면 2",
+	"homeDecimals":     "0~2. 원화는 0, 달러는 2",
+	"calendarId":       "비우면 기본 캘린더. 여행 전용 캘린더 사용을 권장 (개인 일정이 노출되지 않음)",
+	"tileUrl":          "비우면 OpenStreetMap. 예: https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png?api_key=키",
+}
+
+// TemplateRows is a fresh 설정 tab: the header, then one row per setting with its default and a [필수]/[선택] note.
+func TemplateRows() [][]string {
+	rows := [][]string{{"항목", "값", "설명"}}
+	for _, f := range fields {
+		tag := "[선택] "
+		if f.required {
+			tag = "[필수] "
+		}
+		rows = append(rows, []string{f.label, f.def, tag + descriptions[f.key]})
+	}
+	return rows
 }

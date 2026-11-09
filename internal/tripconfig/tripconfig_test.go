@@ -142,3 +142,53 @@ func contains(xs []string, x string) bool {
 	}
 	return false
 }
+
+func TestTemplateRowsCoverEverySettingAndRoundTrip(t *testing.T) {
+	rows := TemplateRows()
+	if len(rows) != len(fields)+1 || rows[0][0] != "항목" {
+		t.Fatalf("header + one row per field expected, got %d rows", len(rows))
+	}
+	for i, f := range fields {
+		r := rows[i+1]
+		if r[0] != f.label || r[1] != f.def || descriptions[f.key] == "" || !strings.HasPrefix(r[2], map[bool]string{true: "[필수]", false: "[선택]"}[f.required]) {
+			t.Errorf("row for %s: %v", f.key, r)
+		}
+	}
+	// the fresh tab parses (every label is recognised): what is still missing is exactly the required settings without a default
+	cfg := Parse(rows, true)
+	var want []string
+	for _, f := range fields {
+		if f.required && f.def == "" {
+			want = append(want, f.label)
+		}
+	}
+	if strings.Join(cfg.Missing, "|") != strings.Join(want, "|") {
+		t.Errorf("missing %v want %v", cfg.Missing, want)
+	}
+}
+
+func TestDatesAndTimesTheSheetTurnedIntoNumbers(t *testing.T) {
+	// 46487 = 2027-04-10, 46491 = 2027-04-14 (days since 1899-12-30); 0.375 = 09:00
+	cfg := Parse(rows(with(base(), "시작일", "46487", "종료일", "46491", "기본 출발 시각", "0.375")), true)
+	if cfg.Start != "2027-04-10" || cfg.End != "2027-04-14" || cfg.Days != 5 || cfg.DefaultStart != "09:00" || len(cfg.Invalid) != 0 {
+		t.Fatalf("%+v", cfg)
+	}
+	// real text is left alone, and so are numbers that cannot be dates
+	text := Parse(rows(with(base(), "시작일", "2027-04-10", "종료일", "2027-04-14", "기본 출발 시각", "9:30")), true)
+	if text.Start != "2027-04-10" || text.DefaultStart != "09:30" {
+		t.Errorf("%+v", text)
+	}
+	if bad := Parse(rows(with(base(), "시작일", "12345")), true); len(bad.Invalid) == 0 {
+		t.Errorf("a number that is not a plausible date must still be rejected: %+v", bad.Start)
+	}
+	for _, in := range []string{"", "abc", "0", "19999", "80000", "2027-04-10"} {
+		if serialDate(in) != in {
+			t.Errorf("serialDate(%q) must not change it, got %q", in, serialDate(in))
+		}
+	}
+	for _, in := range []string{"", "1", "09:00", "x"} {
+		if serialTime(in) != in {
+			t.Errorf("serialTime(%q) must not change it, got %q", in, serialTime(in))
+		}
+	}
+}

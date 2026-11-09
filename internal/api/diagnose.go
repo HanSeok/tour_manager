@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strings"
 
 	"tourmanager/internal/expenses"
@@ -35,7 +36,7 @@ func (t *Trip) checks(ctx context.Context) []Check {
 			return append(out, no("Google 연결 (소유자)", detail))
 		}
 	}
-	rows, err := t.Grid.Rows(ctx, tripconfig.SheetName)
+	rows, err := t.Grid.RawRows(ctx, tripconfig.SheetName)
 	var cfg tripconfig.Config
 	switch {
 	case errors.Is(err, sheets.ErrNotConnected):
@@ -53,7 +54,7 @@ func (t *Trip) checks(ctx context.Context) []Check {
 	case cfg.Configured():
 		out = append(out, yes("설정 탭", fmt.Sprintf("%s · %d일", cfg.Title, cfg.Days)))
 	case len(cfg.Missing) == 1 && cfg.Missing[0] == "설정 탭":
-		out = append(out, no("설정 탭", "'설정' 탭이 없습니다. 템플릿 사본을 쓰거나 항목|값|설명 열로 만드세요"))
+		out = append(out, no("설정 탭", "'설정' 탭이 없습니다. 아래 버튼으로 자동으로 만들거나, 템플릿 사본을 쓰세요"))
 	default:
 		var parts []string
 		if len(cfg.Missing) > 0 {
@@ -98,4 +99,34 @@ func expensesIn(cfg tripconfig.Config, rows [][]string) []expenses.Expense {
 // Diagnose is the owner's "점검" button.
 func (t *Trip) Diagnose(ctx context.Context, _ Principal, _ []json.RawMessage) (any, error) {
 	return t.checks(ctx), nil
+}
+
+// SetupSettings creates the 설정 tab (header + every setting with its default) in a sheet that has none, so a blank
+// spreadsheet is enough to start. A tab that already holds settings is never touched.
+func (t *Trip) SetupSettings(ctx context.Context, who Principal, _ []json.RawMessage) (any, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	rows, err := t.Grid.RawRows(ctx, tripconfig.SheetName)
+	if err != nil && !errors.Is(err, sheets.ErrNoSheet) {
+		return nil, sheetErr("setupSettings", err)
+	}
+	if len(rows) > 1 {
+		return nil, Errf(409, "이미 '설정' 탭이 있습니다. 값을 직접 고쳐 주세요")
+	}
+	template := tripconfig.TemplateRows()
+	if _, err := t.Grid.EnsureTab(ctx, tripconfig.SheetName, template[0]); err != nil {
+		return nil, sheetErr("setupSettings", err)
+	}
+	for _, r := range template[1:] {
+		cells := make([]any, len(r))
+		for i, c := range r {
+			cells[i] = c
+		}
+		if err := t.Grid.Append(ctx, tripconfig.SheetName, cells); err != nil {
+			return nil, sheetErr("setupSettings", err)
+		}
+	}
+	t.cfgOK = false // the next read must see the new tab
+	log.Printf("setupSettings: created the 설정 tab (%s)", who.Email)
+	return map[string]any{"created": len(template) - 1}, nil
 }
