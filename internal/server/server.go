@@ -254,7 +254,9 @@ func secureHeaders(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("X-Frame-Options", "DENY")
-		h.Set("Referrer-Policy", "same-origin")
+		// Not "same-origin": the map tiles come from another site (OpenStreetMap), whose usage policy requires a valid
+		// Referer and answers 403 "Access blocked" without one. This sends only our origin to other sites.
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
 		next.ServeHTTP(w, r)
 	})
 }

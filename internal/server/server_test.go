@@ -68,6 +68,10 @@ func TestMemberSeesDashboardAndBootstrap(t *testing.T) {
 	if page.Header().Get("X-Frame-Options") != "DENY" {
 		t.Error("security headers missing")
 	}
+	// map tiles are fetched from another site that insists on a Referer: it must not be stripped completely
+	if rp := page.Header().Get("Referrer-Policy"); rp != "strict-origin-when-cross-origin" {
+		t.Errorf("Referrer-Policy %q would strip the Referer the OSM tile servers require", rp)
+	}
 	rec := do(h, "POST", "/api/bootstrap", `{"args":[]}`, cookies)
 	var out struct {
 		OK   bool `json:"ok"`
