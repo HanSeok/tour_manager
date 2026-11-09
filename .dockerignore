@@ -1,0 +1,10 @@
+.git
+.omc
+var
+data
+node_modules
+apps-script
+docs
+**/*_test.go
+**/*.test.js
+**/*.test.mjs

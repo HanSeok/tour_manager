@@ -1,0 +1,6 @@
+[
+  ["이메일", "표시이름", "역할"],
+  ["dev-owner@example.com", "소유자", "소유자"],
+  ["dev-editor@example.com", "동행", "편집자"],
+  ["dev-viewer@example.com", "구경", "보기"]
+]

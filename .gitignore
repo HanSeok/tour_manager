@@ -15,3 +15,11 @@ apps-script/js_*.html
 
 __pycache__/
 node_modules/
+
+# Go server
+/var/
+/bin/
+.env
+
+# OMC operational state
+.omc/
