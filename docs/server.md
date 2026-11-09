@@ -4,8 +4,12 @@
 
 ## 지금 되는 것
 - 정적 대시보드 서빙(`prototype/`), Google 로그인 + 멤버 확인, 소유자 Google 연결(`/auth/owner`)
-- `POST /api/bootstrap` (설정 탭 읽기·검증 + `me`), 권한(보기/편집자/소유자), CSRF 방어
-- 아직 없는 것: 지출·동선·캘린더·지도·사진 API, SQLite, 화면의 서버 연결(`remote.js`는 아직 Apps Script용)
+- `POST /api/bootstrap` (설정 탭 읽기·검증 + `me` + 지출), `refresh`, `addExpense` / `updateExpense` / `deleteExpense`
+  - 지출은 소유자 시트의 지출 탭에 저장(탭이 없으면 자동 생성), 기존 10컬럼 + 기록자·수정자·수정시각
+  - 수정·삭제는 `baseUpdatedAt`(보고 있던 수정시각)을 보내면 충돌을 409 로 막는다(생략하면 마지막 쓰기 우선)
+  - 모든 쓰기는 `변경이력` 탭에 남는다(삭제 전 값 포함, 실패해도 저장 자체는 성공 처리)
+- 권한(보기/편집자/소유자), CSRF 방어
+- 아직 없는 것: 동선·캘린더·지도·사진·방문 API, SQLite, 화면의 서버 연결(`remote.js`는 아직 Apps Script용)
   → 서버가 서빙하는 화면은 **샘플 데이터 프로토타입**이다.
 
 ## 로컬 개발 (Google 없이)

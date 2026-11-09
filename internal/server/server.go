@@ -17,13 +17,16 @@ import (
 	"golang.org/x/oauth2"
 
 	"tourmanager/internal/api"
+	"tourmanager/internal/audit"
 	"tourmanager/internal/auth"
+	"tourmanager/internal/expenses"
 	"tourmanager/internal/members"
 	"tourmanager/internal/sheets"
 )
 
 const (
-	membersTTL = time.Minute // a removed member loses access within about this long
+	membersTTL = time.Minute      // a removed member loses access within about this long
+	configTTL  = 15 * time.Second // an edit of the 설정 tab shows up within about this long
 	// Sheets is the only Google scope the owner grants for now; calendar/drive are added when those features land.
 	scopeSheets = "https://www.googleapis.com/auth/spreadsheets"
 )
@@ -69,21 +72,21 @@ func (c Config) validate() error {
 	return nil
 }
 
-// ownerSource reads the spreadsheet with the owner's stored refresh token. Until the owner has connected Google it
-// fails with a message that says what to do.
-type ownerSource struct {
+// ownerGrid reads and writes the spreadsheet with the owner's stored refresh token. Until the owner has connected
+// Google every call fails with a message that says what to do.
+type ownerGrid struct {
 	cfg           *oauth2.Config
 	tokens        auth.TokenStore
 	spreadsheetID string
 
 	mu      sync.Mutex
 	refresh string
-	api     *sheets.API
+	client  *sheets.API
 }
 
 var errNotConnected = errors.New("소유자 Google 연결이 필요합니다 (소유자로 로그인한 뒤 /auth/owner 를 여세요)")
 
-func (o *ownerSource) Rows(ctx context.Context, tab string) ([][]string, error) {
+func (o *ownerGrid) api() (*sheets.API, error) {
 	tok, err := o.tokens.Load()
 	if err != nil {
 		return nil, err
@@ -92,15 +95,62 @@ func (o *ownerSource) Rows(ctx context.Context, tab string) ([][]string, error) 
 		return nil, errNotConnected
 	}
 	o.mu.Lock()
-	if o.api == nil || o.refresh != tok.RefreshToken {
+	defer o.mu.Unlock()
+	if o.client == nil || o.refresh != tok.RefreshToken {
 		// the client outlives the request that created it, so it must not use that request's context
 		src := o.cfg.TokenSource(context.Background(), &oauth2.Token{RefreshToken: tok.RefreshToken})
-		o.api = &sheets.API{HTTP: oauth2.NewClient(context.Background(), oauth2.ReuseTokenSource(nil, src)), SpreadsheetID: o.spreadsheetID}
+		o.client = &sheets.API{HTTP: oauth2.NewClient(context.Background(), oauth2.ReuseTokenSource(nil, src)), SpreadsheetID: o.spreadsheetID}
 		o.refresh = tok.RefreshToken
 	}
-	a := o.api
-	o.mu.Unlock()
+	return o.client, nil
+}
+
+func (o *ownerGrid) Rows(ctx context.Context, tab string) ([][]string, error) {
+	a, err := o.api()
+	if err != nil {
+		return nil, err
+	}
 	return a.Rows(ctx, tab)
+}
+
+func (o *ownerGrid) RawRows(ctx context.Context, tab string) ([][]string, error) {
+	a, err := o.api()
+	if err != nil {
+		return nil, err
+	}
+	return a.RawRows(ctx, tab)
+}
+
+func (o *ownerGrid) Append(ctx context.Context, tab string, row []any) error {
+	a, err := o.api()
+	if err != nil {
+		return err
+	}
+	return a.Append(ctx, tab, row)
+}
+
+func (o *ownerGrid) UpdateRow(ctx context.Context, tab string, n int, row []any) error {
+	a, err := o.api()
+	if err != nil {
+		return err
+	}
+	return a.UpdateRow(ctx, tab, n, row)
+}
+
+func (o *ownerGrid) DeleteRow(ctx context.Context, tab string, n int) error {
+	a, err := o.api()
+	if err != nil {
+		return err
+	}
+	return a.DeleteRow(ctx, tab, n)
+}
+
+func (o *ownerGrid) EnsureTab(ctx context.Context, tab string, header []string) (bool, error) {
+	a, err := o.api()
+	if err != nil {
+		return false, err
+	}
+	return a.EnsureTab(ctx, tab, header)
 }
 
 func New(cfg Config) (http.Handler, error) {
@@ -110,16 +160,21 @@ func New(cfg Config) (http.Handler, error) {
 	secure := strings.HasPrefix(cfg.BaseURL, "https://")
 	tokens := auth.FileTokenStore{Path: filepath.Join(cfg.DataDir, "owner_token.json")}
 
-	var src sheets.Source
+	var grid sheets.Grid
 	var ownerCfg *oauth2.Config
 	if cfg.ClientID != "" {
 		ownerCfg = auth.NewConfig(cfg.ClientID, cfg.ClientSecret, cfg.BaseURL, "/auth/owner/callback", []string{"openid", "email", scopeSheets})
 	}
-	if cfg.FixtureDir != "" {
-		src = sheets.FileSource{Dir: cfg.FixtureDir}
+	if cfg.FixtureDir != "" { // development: the fixtures become an in-memory spreadsheet (changes are lost on restart)
+		mem, err := sheets.LoadFixtures(cfg.FixtureDir)
+		if err != nil {
+			return nil, err
+		}
+		grid = mem
 	} else {
-		src = &ownerSource{cfg: ownerCfg, tokens: tokens, spreadsheetID: cfg.SpreadsheetID}
+		grid = &ownerGrid{cfg: ownerCfg, tokens: tokens, spreadsheetID: cfg.SpreadsheetID}
 	}
+	src := sheets.Source(grid)
 
 	dir := members.NewDirectory(cfg.OwnerEmail, func(ctx context.Context) ([][]string, error) {
 		rows, err := src.Rows(ctx, members.SheetName)
@@ -148,7 +203,10 @@ func New(cfg Config) (http.Handler, error) {
 	}
 
 	rt := api.NewRouter(who, cfg.BaseURL)
-	(&api.Trip{Source: src, Members: dir, Version: cfg.Version}).Register(rt)
+	(&api.Trip{
+		Grid: grid, Members: dir, Version: cfg.Version, CfgTTL: configTTL,
+		Expenses: &expenses.Service{Grid: grid, Log: &audit.GridLog{Grid: grid}},
+	}).Register(rt)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("ok")) })

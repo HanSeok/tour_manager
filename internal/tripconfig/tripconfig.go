@@ -123,6 +123,9 @@ func Parse(rows [][]string, hasSheet bool) Config {
 	return validate(raw, hasSheet)
 }
 
+// IsRealDate reports whether s is an existing YYYY-MM-DD date (2027-02-30 is not).
+func IsRealDate(s string) bool { return isRealDate(s) }
+
 func isRealDate(s string) bool {
 	if !dateRe.MatchString(s) {
 		return false

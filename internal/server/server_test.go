@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -146,5 +147,135 @@ func TestWithoutOwnerConnectionBootstrapExplainsWhy(t *testing.T) {
 	resp := do(h, "POST", "/api/bootstrap", `{"args":[]}`, []*http.Cookie{cookie})
 	if resp.Code != 502 || !strings.Contains(resp.Body.String(), "소유자 Google 연결") {
 		t.Errorf("want 502 with a hint, got %d %s", resp.Code, resp.Body.String())
+	}
+}
+
+type reply struct {
+	OK    bool            `json:"ok"`
+	Data  json.RawMessage `json:"data"`
+	Error string          `json:"error"`
+}
+
+func call(t *testing.T, h http.Handler, cookies []*http.Cookie, fn, args string) (int, reply) {
+	t.Helper()
+	rec := do(h, "POST", "/api/"+fn, `{"args":`+args+`}`, cookies)
+	var r reply
+	_ = json.Unmarshal(rec.Body.Bytes(), &r)
+	return rec.Code, r
+}
+
+type expense struct {
+	ID, Date, Time, Item, Payer, CreatedBy, UpdatedBy, UpdatedAt string
+	Amount                                                       float64
+}
+
+func list(t *testing.T, r reply) []expense {
+	t.Helper()
+	var out []expense
+	if err := json.Unmarshal(r.Data, &out); err != nil {
+		t.Fatalf("list: %v %s", err, r.Data)
+	}
+	return out
+}
+
+const eid = "22222222-2222-4222-8222-222222222222"
+
+func TestExpensesEndToEndWithRolesAndConflicts(t *testing.T) {
+	h := devServer(t)
+	editor := login(t, h, "dev-editor@example.com")
+	owner := login(t, h, "dev-owner@example.com")
+	viewer := login(t, h, "dev-viewer@example.com")
+	add := `[{"id":"` + eid + `","date":"2027-04-11","category":"식비","item":"소바","amount":1200,"payer":"나","method":"카드"}]`
+
+	if code, r := call(t, h, viewer, "addExpense", add); code != 403 {
+		t.Fatalf("viewer must not write: %d %s", code, r.Error)
+	}
+	code, r := call(t, h, editor, "addExpense", add)
+	if code != 200 {
+		t.Fatalf("add: %d %s", code, r.Error)
+	}
+	got := list(t, r)
+	if len(got) != 1 || got[0].CreatedBy != "dev-editor@example.com" || got[0].Item != "소바" || got[0].Amount != 1200 || got[0].UpdatedAt == "" {
+		t.Fatalf("%+v", got)
+	}
+	// retry with the same id: still one row
+	if _, r = call(t, h, editor, "addExpense", add); len(list(t, r)) != 1 {
+		t.Errorf("retry must be idempotent")
+	}
+	// everyone, viewers included, sees it via refresh and bootstrap
+	if _, r = call(t, h, viewer, "refresh", `[]`); len(list(t, reply{Data: mustField(t, r, "expenses")})) != 1 {
+		t.Errorf("viewer refresh must list the expense")
+	}
+	// the owner edits the editor's entry (any editor may), with the version they saw
+	seen := got[0].UpdatedAt
+	upd := `["` + eid + `",{"date":"2027-04-11","category":"식비","item":"소바 곱빼기","amount":1500,"payer":"나","method":"카드"},"` + seen + `"]`
+	code, r = call(t, h, owner, "updateExpense", upd)
+	if code != 200 || list(t, r)[0].UpdatedBy != "dev-owner@example.com" || list(t, r)[0].CreatedBy != "dev-editor@example.com" {
+		t.Fatalf("update: %d %s %s", code, r.Error, r.Data)
+	}
+	// the editor is still looking at the old version → 409 and nothing changes
+	code, r = call(t, h, editor, "deleteExpense", `["`+eid+`","`+seen+`"]`)
+	if code != 409 || !strings.Contains(r.Error, "먼저 수정") {
+		t.Fatalf("stale delete: %d %q", code, r.Error)
+	}
+	_, r = call(t, h, viewer, "refresh", `[]`)
+	if e := list(t, reply{Data: mustField(t, r, "expenses")}); len(e) != 1 || e[0].Amount != 1500 {
+		t.Fatalf("a rejected delete must not change data: %+v", e)
+	}
+	// validation → 422 with the message; unknown id → 404
+	if code, r = call(t, h, editor, "addExpense", `[{"date":"2027-04-11","category":"식비","amount":-5,"payer":"나","method":"카드"}]`); code != 422 || !strings.Contains(r.Error, "금액") {
+		t.Errorf("bad amount: %d %q", code, r.Error)
+	}
+	if code, _ = call(t, h, editor, "deleteExpense", `["nope"]`); code != 404 {
+		t.Errorf("unknown id: %d", code)
+	}
+	// delete with the current version works
+	_, r = call(t, h, owner, "refresh", `[]`)
+	cur := list(t, reply{Data: mustField(t, r, "expenses")})[0].UpdatedAt
+	if code, r = call(t, h, owner, "deleteExpense", `["`+eid+`","`+cur+`"]`); code != 200 || len(list(t, r)) != 0 {
+		t.Fatalf("delete: %d %s", code, r.Error)
+	}
+}
+
+func mustField(t *testing.T, r reply, name string) json.RawMessage {
+	t.Helper()
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(r.Data, &m); err != nil || m[name] == nil {
+		t.Fatalf("no %q in %s (%v)", name, r.Data, err)
+	}
+	return m[name]
+}
+
+func TestBootstrapCreatesExpenseTabAndListsExistingRows(t *testing.T) {
+	h := devServer(t)
+	cookies := login(t, h, "dev-viewer@example.com")
+	code, r := call(t, h, cookies, "bootstrap", `[]`)
+	if code != 200 {
+		t.Fatalf("%d %s", code, r.Error)
+	}
+	if e := list(t, reply{Data: mustField(t, r, "expenses")}); len(e) != 0 {
+		t.Errorf("a fresh trip has no expenses: %+v", e)
+	}
+}
+
+func TestExpenseCallsNeedAConfiguredTrip(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(dir+"/멤버.json", []byte(`[["이메일","표시이름","역할"],["e@example.com","에","편집자"]]`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(Config{BaseURL: "http://localhost:8080", OwnerEmail: "o@example.com", DataDir: t.TempDir(), SessionSecret: []byte(strings.Repeat("s", 32)),
+		DevLogin: true, FixtureDir: dir, Static: fstest.MapFS{"index.html": {Data: []byte("x")}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cookies := login(t, h, "e@example.com")
+	if code, r := call(t, h, cookies, "addExpense", `[{"date":"2027-04-11","amount":1}]`); code != 412 || !strings.Contains(r.Error, "설정") {
+		t.Errorf("want 412 asking for the settings, got %d %q", code, r.Error)
+	}
+	code, r := call(t, h, cookies, "bootstrap", `[]`)
+	var cfg struct{ Missing []string }
+	_ = json.Unmarshal(mustField(t, r, "config"), &cfg)
+	if code != 200 || len(cfg.Missing) == 0 {
+		t.Errorf("bootstrap still answers so the setup screen can show what is missing: %d %+v", code, cfg)
 	}
 }

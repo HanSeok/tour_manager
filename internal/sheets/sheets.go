@@ -39,13 +39,26 @@ type valuesResponse struct {
 	} `json:"error"`
 }
 
+// Rows returns the tab as displayed (formatted values) — right for the settings tab.
 func (a *API) Rows(ctx context.Context, tab string) ([][]string, error) {
-	base := a.Base
-	if base == "" {
-		base = "https://sheets.googleapis.com"
+	return a.rows(ctx, tab, "FORMATTED_VALUE")
+}
+
+// RawRows returns unformatted values (numbers without thousands separators) — right for data tabs.
+func (a *API) RawRows(ctx context.Context, tab string) ([][]string, error) {
+	return a.rows(ctx, tab, "UNFORMATTED_VALUE")
+}
+
+func (a *API) base() string {
+	if a.Base != "" {
+		return a.Base
 	}
-	rng := "'" + strings.ReplaceAll(tab, "'", "''") + "'!A:Z"
-	u := fmt.Sprintf("%s/v4/spreadsheets/%s/values/%s?valueRenderOption=FORMATTED_VALUE", base, url.PathEscape(a.SpreadsheetID), url.PathEscape(rng))
+	return "https://sheets.googleapis.com"
+}
+
+func (a *API) rows(ctx context.Context, tab, render string) ([][]string, error) {
+	rng := quoteTab(tab) + "!A:Z"
+	u := fmt.Sprintf("%s/v4/spreadsheets/%s/values/%s?valueRenderOption=%s", a.base(), url.PathEscape(a.SpreadsheetID), url.PathEscape(rng), render)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
@@ -72,11 +85,7 @@ func (a *API) Rows(ctx context.Context, tab string) ([][]string, error) {
 	for _, r := range vr.Values {
 		row := make([]string, len(r))
 		for i, c := range r {
-			if s, ok := c.(string); ok {
-				row[i] = s
-			} else if c != nil {
-				row[i] = fmt.Sprint(c)
-			}
+			row[i] = CellString(c)
 		}
 		rows = append(rows, row)
 	}

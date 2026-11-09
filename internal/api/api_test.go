@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"tourmanager/internal/expenses"
 	"tourmanager/internal/members"
 	"tourmanager/internal/sheets"
 )
@@ -105,18 +106,10 @@ func TestErrorMapping(t *testing.T) {
 	}
 }
 
-type staticSource map[string][][]string
-
-func (s staticSource) Rows(_ context.Context, tab string) ([][]string, error) {
-	if r, ok := s[tab]; ok {
-		return r, nil
-	}
-	return nil, sheets.ErrNoSheet
-}
-
 func TestBootstrapShapeAndNotConfigured(t *testing.T) {
 	dir := members.NewDirectory("o@x.com", func(context.Context) ([][]string, error) { return nil, nil }, time.Minute)
-	tr := &Trip{Source: staticSource{}, Members: dir, Version: "test"}
+	g := sheets.NewMemGrid(nil)
+	tr := &Trip{Grid: g, Members: dir, Expenses: &expenses.Service{Grid: g}, Version: "test"}
 	rt := NewRouter(func(*http.Request) (Principal, bool) {
 		return Principal{Email: "o@x.com", Name: "o", Role: members.Owner}, true
 	}, "")
