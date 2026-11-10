@@ -97,6 +97,121 @@ func layerOfKakao(name1, name2 string) string {
 	return ""
 }
 
+// kakaoOpenHours is the part of the panel answer that tells when the place is open.
+type kakaoOpenHours struct {
+	All struct {
+		Periods []struct {
+			Title string `json:"period_title"`
+			Days  []struct {
+				Day string `json:"day_of_the_week"`
+				On  *struct {
+					Desc string `json:"start_end_time_desc"`
+				} `json:"on_days"`
+			} `json:"days"`
+		} `json:"periods"`
+	} `json:"all"`
+	Week struct {
+		Periods []struct {
+			Days []struct {
+				Label string `json:"day_of_the_week_desc"`
+				On    *struct {
+					Desc string `json:"start_end_time_desc"`
+				} `json:"on_days"`
+				Off string `json:"off_days_desc"`
+			} `json:"days"`
+		} `json:"week_periods"`
+	} `json:"week_from_today"`
+}
+
+var (
+	weekdayOf = map[string]int{"일": 0, "월": 1, "화": 2, "수": 3, "목": 4, "금": 5, "토": 6}
+	rangeRe   = regexp.MustCompile(`(\d{1,2}):(\d{2})\s*~\s*(\d{1,2}):(\d{2})`)
+)
+
+// parseRanges reads "08:00 ~ 18:00" (or several, comma separated). Anything else in the text — "24시간", a break time
+// written out in words — makes it unreadable, because guessing would give wrong hours.
+func parseRanges(desc string) ([][2]int, bool) {
+	ms := rangeRe.FindAllStringSubmatch(desc, -1)
+	if len(ms) == 0 || len(ms) > maxRangesPerDay {
+		return nil, false
+	}
+	if strings.Trim(rangeRe.ReplaceAllString(desc, ""), " ,/·\t") != "" {
+		return nil, false
+	}
+	out := make([][2]int, 0, len(ms))
+	for _, m := range ms {
+		oh, _ := strconv.Atoi(m[1])
+		om, _ := strconv.Atoi(m[2])
+		ch, _ := strconv.Atoi(m[3])
+		cm, _ := strconv.Atoi(m[4])
+		if om > 59 || cm > 59 || oh > 24 || ch > 24 || (oh == 24 && om != 0) || (ch == 24 && cm != 0) {
+			return nil, false
+		}
+		open, closeAt := oh*60+om, ch*60+cm
+		switch {
+		case closeAt == open:
+			return nil, false // "09:00 ~ 09:00" could mean 24 h or closed
+		case closeAt < open:
+			closeAt += 1440 // past midnight
+		}
+		out = append(out, [2]int{open, closeAt})
+	}
+	return out, true
+}
+
+// kakaoHours turns Kakao's opening-hours block into weekly hours, or nil when it cannot be read completely.
+// The weekly pattern ("all") is used when it is a single schedule: days it does not list are the closed days. With several
+// schedules (a different Sunday, say) that inference would be wrong, so the next seven days Kakao spells out are used.
+func kakaoHours(oh *kakaoOpenHours) Hours {
+	if oh == nil {
+		return nil
+	}
+	if ps := oh.All.Periods; len(ps) == 1 {
+		h := Hours{0: {}, 1: {}, 2: {}, 3: {}, 4: {}, 5: {}, 6: {}}
+		for _, d := range ps[0].Days {
+			wd, ok := weekdayOf[strings.TrimSpace(d.Day)]
+			if !ok || d.On == nil {
+				return nil
+			}
+			r, ok := parseRanges(d.On.Desc)
+			if !ok {
+				return nil
+			}
+			h[wd] = r
+		}
+		return h
+	}
+	h := Hours{}
+	for _, p := range oh.Week.Periods {
+		for _, d := range p.Days {
+			label := []rune(strings.TrimSpace(d.Label))
+			if len(label) == 0 {
+				return nil
+			}
+			wd, ok := weekdayOf[string(label[0])]
+			if !ok {
+				return nil
+			}
+			switch {
+			case d.On != nil:
+				r, ok := parseRanges(d.On.Desc)
+				if !ok {
+					return nil
+				}
+				h[wd] = r
+			case strings.TrimSpace(d.Off) != "":
+				h[wd] = [][2]int{}
+			default:
+				return nil
+			}
+		}
+	}
+	if len(h) != 7 {
+		return nil
+	}
+	return h
+}
+
 // kakaoPlace reads the name, address, position and category of a place from Kakao's own place API.
 func kakaoPlace(ctx context.Context, client *http.Client, id string) (Result, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, kakaoAPI+id, nil)
@@ -133,6 +248,7 @@ func kakaoPlace(ctx context.Context, client *http.Client, id string) (Result, er
 				Road string `json:"road"`
 			} `json:"address"`
 		} `json:"summary"`
+		OpenHours json.RawMessage `json:"open_hours"` // decoded apart: a surprise in here costs only the hours
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 4<<20)).Decode(&p); err != nil {
 		return Result{}, fmt.Errorf("maplink: kakao: unreadable answer: %w", err)
@@ -153,5 +269,12 @@ func kakaoPlace(ctx context.Context, client *http.Client, id string) (Result, er
 	if addr == "" {
 		addr = strings.TrimSpace(s.Address.Disp)
 	}
-	return Result{Name: name, Lat: lat, Lng: lng, Layer: layerOfKakao(s.Category.Name1, s.Category.Name2), Address: addr}, nil
+	var hours Hours
+	if len(p.OpenHours) > 0 {
+		var oh kakaoOpenHours
+		if json.Unmarshal(p.OpenHours, &oh) == nil {
+			hours, _ = CleanHours(kakaoHours(&oh))
+		}
+	}
+	return Result{Name: name, Lat: lat, Lng: lng, Layer: layerOfKakao(s.Category.Name1, s.Category.Name2), Address: addr, Hours: hours}, nil
 }

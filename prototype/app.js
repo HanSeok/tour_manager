@@ -154,7 +154,7 @@ const linkLabel = (u) => (/kakao|kko\.to/.test(u) ? '카카오맵에서 보기' 
 const linkIcon = (p) => (p && safeLink(p.link)
   ? ` <a class="plink" href="${esc(safeLink(p.link))}" target="_blank" rel="noopener noreferrer" title="${linkLabel(p.link)} (사진·후기)">🔗</a>` : '');
 const placeFromTrip = (p) => ({
-  id: p.id, name: p.name, layer: p.layer, category: '직접 추가', lat: p.lat, lng: p.lng, hours: null, rating: null, reviews: null, price: '',
+  id: p.id, name: p.name, layer: p.layer, category: '직접 추가', lat: p.lat, lng: p.lng, hours: p.hours && Object.keys(p.hours).length ? p.hours : null, rating: null, reviews: null, price: '',
   memo: p.memo || '', link: safeLink(p.link), url: safeLink(p.link) || `${GMAPS}/search/?api=1&query=${p.lat},${p.lng}`, own: true,
   createdBy: p.createdBy, updatedBy: p.updatedBy, updatedAt: p.updatedAt,
 });
@@ -322,14 +322,15 @@ map.on('popupopen', (e) => {
 });
 
 // The new-place form (Go server): opened by tapping the map, or by a pasted Google Maps link (name and position filled in).
-function openNewPlaceForm(ll, name = '', layer = '', memo = '', link = '', editId = '') {
+function openNewPlaceForm(ll, name = '', layer = '', memo = '', link = '', editId = '', hours = null) {
   L.popup({ minWidth: 230 }).setLatLng(ll).setContent(`<form class="pop newplace"${editId ? ` data-edit-id="${esc(editId)}"` : ''}><b>${editId ? '장소 수정' : '새 장소'}</b>
     <small>${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}</small>
     <input name="name" placeholder="장소 이름" maxlength="60" required value="${esc(name)}">
     <select name="layer" aria-label="분류">${LAYERS.map((l) => `<option${l === layer ? ' selected' : ''}>${l}</option>`).join('')}</select>
     <input name="memo" placeholder="메모 (선택)" maxlength="200" value="${esc(memo.slice(0, 200))}">
     <input type="hidden" name="link" value="${esc(safeLink(link))}">
-    ${safeLink(link) ? '<small>🔗 원본 링크가 함께 저장됩니다</small>' : ''}
+    <input type="hidden" name="hours" value="${hours ? esc(JSON.stringify(hours)) : ''}">
+    ${safeLink(link) ? '<small>🔗 원본 링크가 함께 저장됩니다</small>' : ''}${hours ? '<small>🕘 영업시간도 함께 저장됩니다 (읽은 시점 기준)</small>' : ''}
     <button type="submit" class="submit">${editId ? '저장' : '추가'}</button></form>`).openOn(map);
 }
 
@@ -349,7 +350,7 @@ function findFromLink(form) {
       form.link.value = ''; form.hidden = true;
       const ll = L.latLng(r.lat, r.lng);
       map.setView(ll, Math.max(map.getZoom(), 16));
-      openNewPlaceForm(ll, r.name, r.layer, r.address || '', r.link || '');
+      openNewPlaceForm(ll, r.name, r.layer, r.address || '', r.link || '', '', r.hours || null);
     })
     .catch((e) => showError(`링크를 읽지 못했습니다: ${e.message}`))
     .finally(() => { btn.disabled = false; btn.textContent = '찾기'; });
@@ -374,10 +375,15 @@ function addLinkControl() {
   linkControl = new Box({ position: 'topleft' }).addTo(map);
 }
 
+// The opening hours carried by a link-read place travel in a hidden field (the server checks them again before storing).
+function hoursOfForm(form) {
+  try { const h = JSON.parse(form.hours.value || 'null'); return h && typeof h === 'object' ? h : null; } catch { return null; }
+}
+
 function runEditPlace(id) {
   const p = byId[id];
   if (!p) return;
-  openNewPlaceForm(L.latLng(p.lat, p.lng), p.name, p.layer, p.memo, p.link, id);
+  openNewPlaceForm(L.latLng(p.lat, p.lng), p.name, p.layer, p.memo, p.link, id, p.hours);
 }
 
 function submitNewPlace(form, ll) {
@@ -386,7 +392,7 @@ function submitNewPlace(form, ll) {
   const editId = form.dataset.editId;
   if (editId) {
     const p = byId[editId];
-    const edited = { id: editId, name: form.name.value, layer: form.layer.value, lat: p.lat, lng: p.lng, memo: form.memo.value, link: form.link.value };
+    const edited = { id: editId, name: form.name.value, layer: form.layer.value, lat: p.lat, lng: p.lng, memo: form.memo.value, link: form.link.value, hours: hoursOfForm(form) };
     callWrite('updatePlace', editId, edited, p.updatedAt)
       .then((list) => { map.closePopup(); applyTripPlaces(list); render(); })
       .catch((e) => {
@@ -396,7 +402,7 @@ function submitNewPlace(form, ll) {
       });
     return;
   }
-  const place = { id: newId(), name: form.name.value, layer: form.layer.value, lat: Number(ll.lat.toFixed(6)), lng: Number(ll.lng.toFixed(6)), memo: form.memo.value, link: form.link.value };
+  const place = { id: newId(), name: form.name.value, layer: form.layer.value, lat: Number(ll.lat.toFixed(6)), lng: Number(ll.lng.toFixed(6)), memo: form.memo.value, link: form.link.value, hours: hoursOfForm(form) };
   callWrite('addPlace', place)
     .then((list) => { map.closePopup(); applyTripPlaces(list); render(); })
     .catch((e) => { btn.disabled = false; showError(`장소를 추가하지 못했습니다: ${e.message}`); });

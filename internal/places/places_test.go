@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"tourmanager/internal/audit"
+	"tourmanager/internal/maplink"
 	"tourmanager/internal/sheets"
 )
 
@@ -232,7 +233,7 @@ func TestTheSourceLinkIsStoredAndReturned(t *testing.T) {
 		t.Fatalf("%v %+v", err, list)
 	}
 	rows, _ := g.Rows(context.Background(), Tab)
-	if len(Header) != 10 || Header[9] != "링크" || len(rows[1]) != 10 || rows[1][9] != in.Link {
+	if len(Header) != 11 || Header[9] != "링크" || Header[10] != "영업시간" || len(rows[1]) != 11 || rows[1][9] != in.Link {
 		t.Errorf("header=%v row=%v", Header, rows[1])
 	}
 	in.Link = "https://place.map.kakao.com/1650036035"
@@ -289,5 +290,77 @@ func TestPlacesStoredBeforeTheLinkColumnStillReadAndTheHeaderIsCompleted(t *test
 	in.Link = "https://kko.to/abc"
 	if list, err = s.Update(context.Background(), "b@x.com", id1, in, nil); err != nil || list[0].Link != in.Link {
 		t.Errorf("%v %+v", err, list)
+	}
+}
+
+func TestOpeningHoursAreStoredAsJSONInTheirOwnColumnAndReturned(t *testing.T) {
+	s, g, _ := newSvc()
+	in := okInput()
+	in.Hours = maplink.Hours{1: {{480, 1080}}, 6: {}}
+	list, err := s.Add(context.Background(), "a@x.com", in)
+	if err != nil || len(list[0].Hours) != 2 || list[0].Hours[1][0] != [2]int{480, 1080} || list[0].Hours[6] == nil || len(list[0].Hours[6]) != 0 {
+		t.Fatalf("%v %+v", err, list)
+	}
+	rows, _ := g.Rows(context.Background(), Tab)
+	if rows[1][10] != `{"1":[[480,1080]],"6":[]}` {
+		t.Errorf("the cell is compact JSON: %q", rows[1][10])
+	}
+	// a place stored without hours has none; an edit may add, change or clear them
+	in.ID = "22222222-2222-4222-8222-222222222222"
+	in.Hours = nil
+	list, _ = s.Add(context.Background(), "a@x.com", in)
+	if list[1].Hours != nil {
+		t.Errorf("no hours given: %v", list[1].Hours)
+	}
+	in.Hours = maplink.Hours{2: {{600, 700}}}
+	if list, err = s.Update(context.Background(), "b@x.com", in.ID, in, nil); err != nil || list[1].Hours[2][0] != [2]int{600, 700} {
+		t.Errorf("update adds hours: %v %+v", err, list)
+	}
+	in.Hours = nil
+	if list, err = s.Update(context.Background(), "b@x.com", in.ID, in, nil); err != nil || list[1].Hours != nil {
+		t.Errorf("update clears hours: %v %+v", err, list)
+	}
+}
+
+func TestNonsenseHoursAreRefusedAndNothingIsStored(t *testing.T) {
+	for _, h := range []maplink.Hours{{7: {{1, 2}}}, {1: {{700, 600}}}, {1: {{0, 3000}}}, {1: {{1, 2}, {3, 4}, {5, 6}, {7, 8}, {9, 10}}}} {
+		s, g, _ := newSvc()
+		in := okInput()
+		in.Hours = h
+		var ve *ValidationError
+		if _, err := s.Add(context.Background(), "a@x.com", in); !errors.As(err, &ve) {
+			t.Errorf("%v: want ValidationError, got %v", h, err)
+		}
+		if rows, _ := g.Rows(context.Background(), Tab); len(rows) > 1 {
+			t.Errorf("%v stored", h)
+		}
+	}
+}
+
+func TestAHandEditedOrBrokenHoursCellNeverBreaksTheList(t *testing.T) {
+	row := func(cell string) []string {
+		return []string{id1, "장소", "식당", "26.2", "127.7", "", "a@x.com", "a@x.com", "2027-04-10T00:00:00.000Z", "", cell}
+	}
+	for _, cell := range []string{"", "not json", `{"9":[[1,2]]}`, `{"1":[[900,100]]}`, `[1,2]`, `{"1":"x"}`} {
+		g := sheets.NewMemGrid(map[string][][]string{Tab: {Header, row(cell)}})
+		list, err := (&Service{Grid: g}).List(context.Background())
+		if err != nil || len(list) != 1 || list[0].Hours != nil {
+			t.Errorf("%q: %v %+v", cell, err, list)
+		}
+	}
+}
+
+func TestPlacesStoredBeforeTheHoursColumnStillReadAndTheHeaderIsCompleted(t *testing.T) {
+	old := [][]string{
+		{"ID", "이름", "분류", "위도", "경도", "메모", "기록자", "수정자", "수정시각", "링크"},
+		{id1, "옛 장소", "관광", "26.2", "127.7", "", "a@x.com", "a@x.com", "2027-04-10T00:00:00.000Z", "https://kko.to/abc"},
+	}
+	g := sheets.NewMemGrid(map[string][][]string{Tab: old})
+	list, err := (&Service{Grid: g}).List(context.Background())
+	if err != nil || list[0].Link != "https://kko.to/abc" || list[0].Hours != nil {
+		t.Fatalf("%v %+v", err, list)
+	}
+	if rows, _ := g.Rows(context.Background(), Tab); rows[0][10] != "영업시간" {
+		t.Errorf("header = %v", rows[0])
 	}
 }

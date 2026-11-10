@@ -2,6 +2,7 @@ package maplink
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -426,5 +427,124 @@ func TestResolveReturnsALinkWorthKeeping(t *testing.T) {
 	res, _ = prod(&rt{}).Resolve(context.Background(), "https://map.kakao.com/link/map/Cafe,37.5,127.0")
 	if res.Link != "https://map.kakao.com/link/map/Cafe,37.5,127.0" {
 		t.Errorf("link/map: %q", res.Link)
+	}
+}
+
+// ---- opening hours (Kakao panel) ----
+
+func hoursOf(t *testing.T, js string) Hours {
+	t.Helper()
+	var oh kakaoOpenHours
+	if err := json.Unmarshal([]byte(js), &oh); err != nil {
+		t.Fatal(err)
+	}
+	return kakaoHours(&oh)
+}
+
+func day(d string, desc string) string {
+	return `{"day_of_the_week":"` + d + `","on_days":{"start_end_time_desc":"` + desc + `"}}`
+}
+
+func TestKakaoHoursReadsTheWeeklyPatternAndTreatsUnlistedDaysAsClosed(t *testing.T) {
+	// the real shape of 카페인큐브: 월~금 08:00~18:00, "매주 토요일, 일요일, 공휴일" off
+	js := `{"all":{"periods":[{"period_title":"기본 영업시간","days":[` +
+		day("월", "08:00 ~ 18:00") + `,` + day("화", "08:00 ~ 18:00") + `,` + day("수", "08:00 ~ 18:00") + `,` +
+		day("목", "08:00 ~ 18:00") + `,` + day("금", "08:00 ~ 18:00") + `]}],"all_days_off_info":"매주 토요일, 일요일, 공휴일"}}`
+	h := hoursOf(t, js)
+	if len(h) != 7 {
+		t.Fatalf("every weekday must be stated (closed ones as empty): %v", h)
+	}
+	for wd := 1; wd <= 5; wd++ {
+		if len(h[wd]) != 1 || h[wd][0] != [2]int{480, 1080} {
+			t.Errorf("weekday %d = %v", wd, h[wd])
+		}
+	}
+	if h[0] == nil || len(h[0]) != 0 || h[6] == nil || len(h[6]) != 0 {
+		t.Errorf("Sunday and Saturday are closed (stated, not unknown): sun=%v sat=%v", h[0], h[6])
+	}
+}
+
+func TestKakaoHoursFallsBackToTheNextSevenDays(t *testing.T) {
+	// no weekly pattern (카카오프렌즈 코엑스): the 7 dated days say the same thing; "(11/10)" is a Tuesday
+	mk := func(label, body string) string { return `{"day_of_the_week_desc":"` + label + `",` + body + `}` }
+	on := `"on_days":{"start_end_time_desc":"10:30 ~ 22:00"}`
+	js := `{"week_from_today":{"week_periods":[{"days":[` + mk("화(11/10)", on) + `,` + mk("수(11/11)", on) + `,` + mk("목(11/12)", on) + `,` + mk("금(11/13)", on) + `]},` +
+		`{"days":[` + mk("토(11/14)", `"off_days_desc":"휴무일"`) + `,` + mk("일(11/15)", on) + `]},{"days":[` + mk("월(11/16)", on) + `]}]}}`
+	h := hoursOf(t, js)
+	if len(h) != 7 || h[2][0] != [2]int{630, 1320} || h[0][0] != [2]int{630, 1320} || h[1][0] != [2]int{630, 1320} {
+		t.Errorf("hours = %v", h)
+	}
+	if h[6] == nil || len(h[6]) != 0 {
+		t.Errorf("Saturday is closed: %v", h[6])
+	}
+}
+
+func TestKakaoHoursPastMidnightAndSplitRanges(t *testing.T) {
+	h := hoursOf(t, `{"all":{"periods":[{"period_title":"기본 영업시간","days":[`+
+		day("금", "18:00 ~ 02:00")+`,`+day("토", "11:00 ~ 14:00, 17:00 ~ 24:00")+`]}]}}`)
+	if h[5][0] != [2]int{1080, 1560} {
+		t.Errorf("close after midnight is +24h like the dashboard expects: %v", h[5])
+	}
+	if len(h[6]) != 2 || h[6][0] != [2]int{660, 840} || h[6][1] != [2]int{1020, 1440} {
+		t.Errorf("two ranges, 24:00 = end of day: %v", h[6])
+	}
+}
+
+func TestKakaoHoursIsUnknownRatherThanWrong(t *testing.T) {
+	cases := map[string]string{
+		"nothing":             `{}`,
+		"unreadable time":     `{"all":{"periods":[{"period_title":"기본 영업시간","days":[` + day("월", "24시간 영업") + `]}]}}`,
+		"extra words":         `{"all":{"periods":[{"period_title":"기본 영업시간","days":[` + day("월", "09:00 ~ 18:00 브레이크 14:00 ~ 15:00 휴게") + `]}]}}`,
+		"unknown weekday":     `{"all":{"periods":[{"period_title":"기본 영업시간","days":[` + day("매일", "09:00 ~ 18:00") + `]}]}}`,
+		"same open and close": `{"all":{"periods":[{"period_title":"기본 영업시간","days":[` + day("월", "09:00 ~ 09:00") + `]}]}}`,
+		"hour out of range":   `{"all":{"periods":[{"period_title":"기본 영업시간","days":[` + day("월", "09:00 ~ 31:00") + `]}]}}`,
+		// two periods (e.g. a different schedule on Sundays): the unlisted days are NOT necessarily closed
+		"several periods": `{"all":{"periods":[{"period_title":"기본 영업시간","days":[` + day("월", "09:00 ~ 18:00") + `]},{"period_title":"일요일","days":[` + day("일", "10:00 ~ 12:00") + `]}]}}`,
+		"week too short":  `{"week_from_today":{"week_periods":[{"days":[{"day_of_the_week_desc":"화(11/10)","on_days":{"start_end_time_desc":"10:00 ~ 12:00"}}]}]}}`,
+	}
+	for name, js := range cases {
+		if h := hoursOf(t, js); h != nil {
+			t.Errorf("%s: must stay unknown (nil), got %v", name, h)
+		}
+	}
+	if kakaoHours(nil) != nil {
+		t.Error("nil input")
+	}
+}
+
+func TestCleanHoursAcceptsOnlySaneHours(t *testing.T) {
+	good := Hours{1: {{480, 1080}}, 0: {}, 5: {{1080, 1560}}}
+	if h, ok := CleanHours(good); !ok || len(h) != 3 {
+		t.Errorf("good hours refused: %v %v", h, ok)
+	}
+	if h, ok := CleanHours(nil); !ok || h != nil {
+		t.Errorf("no hours is fine and stays nil: %v %v", h, ok)
+	}
+	if h, ok := CleanHours(Hours{}); !ok || h != nil {
+		t.Errorf("empty hours mean unknown: %v %v", h, ok)
+	}
+	bad := []Hours{
+		{7: {{1, 2}}}, {-1: {{1, 2}}}, // not a weekday
+		{1: {{600, 600}}}, {1: {{700, 600}}}, // empty or backwards
+		{1: {{-5, 600}}}, {1: {{0, 2881}}}, // out of the 48 h window
+		{1: {{1, 2}, {3, 4}, {5, 6}, {7, 8}, {9, 10}}}, // too many ranges
+	}
+	for _, h := range bad {
+		if _, ok := CleanHours(h); ok {
+			t.Errorf("accepted %v", h)
+		}
+	}
+}
+
+func TestKakaoPlaceCarriesItsHoursAndAnUnreadableHoursBlockNeverBreaksTheRead(t *testing.T) {
+	withHours := strings.TrimSuffix(kakaoBody, "}") + `,"open_hours":{"all":{"periods":[{"period_title":"기본 영업시간","days":[` + day("월", "08:00 ~ 18:00") + `]}]}}}`
+	res, err := prod(&rt{bodies: map[string]string{kakaoPanel: withHours}}).Resolve(context.Background(), "https://place.map.kakao.com/1650036035")
+	if err != nil || res.Hours[1][0] != [2]int{480, 1080} || res.Name != "카페인큐브" {
+		t.Fatalf("%v %+v", err, res)
+	}
+	broken := strings.TrimSuffix(kakaoBody, "}") + `,"open_hours":"not an object"}`
+	res, err = prod(&rt{bodies: map[string]string{kakaoPanel: broken}}).Resolve(context.Background(), "https://place.map.kakao.com/1650036035")
+	if err != nil || res.Name != "카페인큐브" || res.Hours != nil {
+		t.Errorf("a malformed hours block must only cost the hours: %v %+v", err, res)
 	}
 }

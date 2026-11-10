@@ -33,7 +33,7 @@ const (
 )
 
 // Header is the first row of the 장소 tab. Reads are positional.
-var Header = []string{"ID", "이름", "분류", "위도", "경도", "메모", "기록자", "수정자", "수정시각", "링크"}
+var Header = []string{"ID", "이름", "분류", "위도", "경도", "메모", "기록자", "수정자", "수정시각", "링크", "영업시간"}
 
 const (
 	colID = iota
@@ -46,6 +46,7 @@ const (
 	colUpdatedBy
 	colUpdatedAt
 	colLink
+	colHours
 )
 
 // Layers are the categories the dashboard offers (colour and filter).
@@ -58,27 +59,29 @@ var (
 
 // Place is one stored place, as the dashboard receives it.
 type Place struct {
-	ID        string  `json:"id"`
-	Name      string  `json:"name"`
-	Layer     string  `json:"layer"`
-	Lat       float64 `json:"lat"`
-	Lng       float64 `json:"lng"`
-	Memo      string  `json:"memo"`
-	CreatedBy string  `json:"createdBy"`
-	UpdatedBy string  `json:"updatedBy"`
-	UpdatedAt string  `json:"updatedAt"` // pass back as baseUpdatedAt when editing or deleting
-	Link      string  `json:"link"`      // where the place came from (a Google / Kakao map link), "" if it was tapped on the map
+	ID        string        `json:"id"`
+	Name      string        `json:"name"`
+	Layer     string        `json:"layer"`
+	Lat       float64       `json:"lat"`
+	Lng       float64       `json:"lng"`
+	Memo      string        `json:"memo"`
+	CreatedBy string        `json:"createdBy"`
+	UpdatedBy string        `json:"updatedBy"`
+	UpdatedAt string        `json:"updatedAt"`       // pass back as baseUpdatedAt when editing or deleting
+	Link      string        `json:"link"`            // where the place came from (a Google / Kakao map link), "" if it was tapped on the map
+	Hours     maplink.Hours `json:"hours,omitempty"` // opening hours when the source gave them (Kakao); nil = unknown
 }
 
 // Input is what the dashboard submits. Coordinates arrive as JSON numbers or numeric strings.
 type Input struct {
-	ID    string `json:"id"`
-	Name  string `json:"name"`
-	Layer string `json:"layer"`
-	Lat   any    `json:"lat"`
-	Lng   any    `json:"lng"`
-	Memo  string `json:"memo"`
-	Link  string `json:"link"`
+	ID    string        `json:"id"`
+	Name  string        `json:"name"`
+	Layer string        `json:"layer"`
+	Lat   any           `json:"lat"`
+	Lng   any           `json:"lng"`
+	Memo  string        `json:"memo"`
+	Link  string        `json:"link"`
+	Hours maplink.Hours `json:"hours"`
 }
 
 // ValidationError is a user-facing input problem (HTTP 422).
@@ -130,6 +133,7 @@ func hasControl(s string) bool {
 type cleaned struct {
 	Name, Layer, Memo, Link string
 	Lat, Lng                float64
+	Hours                   maplink.Hours
 }
 
 func clean(in Input) (cleaned, error) {
@@ -155,6 +159,10 @@ func clean(in Input) (cleaned, error) {
 	if !ok {
 		return cleaned{}, invalid("분류는 %s 중 하나여야 합니다", strings.Join(Layers, ", "))
 	}
+	hours, okHours := maplink.CleanHours(in.Hours)
+	if !okHours {
+		return cleaned{}, invalid("영업시간이 올바르지 않습니다")
+	}
 	lat, okLat := number(in.Lat)
 	lng, okLng := number(in.Lng)
 	switch {
@@ -165,7 +173,7 @@ func clean(in Input) (cleaned, error) {
 	case lat == 0 && lng == 0:
 		return cleaned{}, invalid("위치를 지도에서 골라 주세요") // 0,0 is what a missing value looks like
 	}
-	return cleaned{Name: name, Layer: in.Layer, Memo: memo, Link: link, Lat: lat, Lng: lng}, nil
+	return cleaned{Name: name, Layer: in.Layer, Memo: memo, Link: link, Lat: lat, Lng: lng, Hours: hours}, nil
 }
 
 func cell(row []string, i int) string {
@@ -186,11 +194,29 @@ func fromRow(row []string) (Place, bool) {
 		name = row[colName] // not trimmed away: what was stored is what comes back
 	}
 	return Place{ID: cell(row, colID), Name: name, Layer: cell(row, colLayer), Lat: lat, Lng: lng, Memo: cell(row, colMemo),
-		CreatedBy: cell(row, colCreatedBy), UpdatedBy: cell(row, colUpdatedBy), UpdatedAt: cell(row, colUpdatedAt), Link: cell(row, colLink)}, true
+		CreatedBy: cell(row, colCreatedBy), UpdatedBy: cell(row, colUpdatedBy), UpdatedAt: cell(row, colUpdatedAt), Link: cell(row, colLink), Hours: hoursOfCell(cell(row, colHours))}, true
+}
+
+// hoursOfCell reads the 영업시간 cell. The sheet can be edited by hand, so anything that is not clean hours is "unknown".
+func hoursOfCell(cell string) maplink.Hours {
+	if cell == "" {
+		return nil
+	}
+	var h maplink.Hours
+	if json.Unmarshal([]byte(cell), &h) != nil {
+		return nil
+	}
+	h, _ = maplink.CleanHours(h)
+	return h
 }
 
 func toRow(c cleaned, id, createdBy, updatedBy, updatedAt string) []any {
-	return []any{id, c.Name, c.Layer, c.Lat, c.Lng, c.Memo, createdBy, updatedBy, updatedAt, c.Link}
+	hours := ""
+	if len(c.Hours) > 0 {
+		b, _ := json.Marshal(c.Hours) // weekday keys sort as text: "0" … "6"
+		hours = string(b)
+	}
+	return []any{id, c.Name, c.Layer, c.Lat, c.Lng, c.Memo, createdBy, updatedBy, updatedAt, c.Link, hours}
 }
 
 func anyToStrings(row []any) []string {
