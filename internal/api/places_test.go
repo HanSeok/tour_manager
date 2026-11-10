@@ -163,3 +163,27 @@ func TestPlaceLinkRoundTripsThroughTheServer(t *testing.T) {
 		t.Errorf("an unsafe link must be refused: %d %v", code, out)
 	}
 }
+
+func TestOpeningHoursTravelFromTheLinkReadingToTheStoredPlace(t *testing.T) {
+	f := &fakeLinks{res: maplink.Result{Name: "카페", Lat: 33.4, Lng: 126.5, Hours: maplink.Hours{1: {{480, 1080}}, 6: {}}}}
+	rt := placesRouterWith(members.Editor, configuredGrid(), f)
+	_, out := call(rt, "resolvePlaceLink", `{"args":["https://place.map.kakao.com/1650036035"]}`, nil)
+	h, _ := out["data"].(map[string]any)["hours"].(map[string]any)
+	if len(h) != 2 || h["1"].([]any)[0].([]any)[0] != 480.0 {
+		t.Fatalf("hours = %v", h)
+	}
+	body := `{"args":[{"id":"` + pid + `","name":"카페","layer":"식당","lat":33.4,"lng":126.5,"hours":{"1":[[480,1080]],"6":[]}}]}`
+	if code, out := call(rt, "addPlace", body, nil); code != 200 {
+		t.Fatalf("%d %v", code, out)
+	}
+	_, out = call(rt, "refresh", `{"args":[]}`, nil)
+	tp, _ := out["data"].(map[string]any)["tripPlaces"].([]any)
+	got, _ := tp[0].(map[string]any)["hours"].(map[string]any)
+	if len(got) != 2 || len(got["6"].([]any)) != 0 {
+		t.Errorf("stored hours come back: %v", got)
+	}
+	bad := strings.Replace(body, `"1":[[480,1080]]`, `"9":[[1,2]]`, 1)
+	if code, _ := call(rt, "addPlace", strings.Replace(bad, pid, "66666666-6666-4666-8666-666666666666", 1), nil); code != 422 {
+		t.Errorf("nonsense hours must be refused: %d", code)
+	}
+}

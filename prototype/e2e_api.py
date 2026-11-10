@@ -5,6 +5,7 @@ Run (fresh dev server, in-memory sheet):
   python3 prototype/e2e_api.py http://localhost:8767/
 Needs python playwright and a Chrome (CHROME env, default /usr/bin/google-chrome).
 """
+import json
 import os
 import sys
 
@@ -256,7 +257,38 @@ with sync_playwright() as p:
     A.wait_for_selector('.newplace [name=name]')
     check(A.input_value('.newplace [name=name]') == '카카오판교오피스' and '37.40206' in A.inner_text('.newplace'), 'a Kakao Map link fills in the name and position')
     A.keyboard.press('Escape')
-    A.evaluate("callServer('deletePlace', PLACES.find((p) => p.own).id).then(() => refreshExpenses())")
+
+    # a Kakao place page also gives opening hours: stored with the place, shown in its popup, kept when it is edited.
+    # (the dev server cannot reach Kakao, so the link-reading answer is faked; the storage and the screen are real)
+    HOURS = {str(d): ([[480, 1080]] if d in (1, 2, 3, 4, 5) else []) for d in range(7)}
+    A.route('**/api/resolvePlaceLink', lambda r: r.fulfill(status=200, content_type='application/json', body=json.dumps(
+        {'ok': True, 'data': {'name': '카페인큐브', 'lat': 33.45294, 'lng': 126.57214, 'layer': '식당', 'link': 'https://place.map.kakao.com/1650036035', 'hours': HOURS}})))
+    A.evaluate('map.closePopup()')
+    A.wait_for_function("!document.querySelector('.newplace')")
+    A.click('.linkbtn') if not A.is_visible('.linkform') else None
+    A.fill('.linkform [name=link]', 'https://place.map.kakao.com/1650036035')
+    A.click('.linkform button')
+    A.wait_for_selector('.newplace [name=name]')
+    check('영업시간도 함께 저장' in A.inner_text('.newplace'), 'the form says the opening hours are saved too')
+    A.click('.newplace .submit')
+    A.wait_for_function("PLACES.some((p) => p.own && p.name === '카페인큐브')")
+    kp = [p for p in trip_places(A) if p['name'] == '카페인큐브'][0]
+    check(kp.get('hours') == HOURS, f'the hours are stored with the place and come back: {kp.get("hours")}')
+    A.wait_for_function("!document.querySelector('.newplace')")
+    A.evaluate("pins.eachLayer((m) => { const pp = m.getPopup && m.getPopup(); if (pp && /카페인큐브/.test(pp.getContent())) m.openPopup(); })")
+    A.wait_for_selector('.leaflet-popup [data-edit-place]')
+    pop = A.inner_text('.leaflet-popup')
+    check('08:00' in pop or '휴무' in pop, f'the popup shows the opening hours for the day: {pop!r}')
+    A.click('.leaflet-popup [data-edit-place]')
+    A.wait_for_selector('.newplace[data-edit-id] [name=name]')
+    A.fill('.newplace [name=name]', '카페인큐브 제주')
+    A.click('.newplace .submit')
+    A.wait_for_function("PLACES.some((p) => p.name === '카페인큐브 제주')")
+    kp = [p for p in trip_places(A) if p['name'] == '카페인큐브 제주'][0]
+    check(kp.get('hours') == HOURS, 'editing the place keeps its opening hours')
+    A.unroute('**/api/resolvePlaceLink')
+    A.wait_for_function("!document.querySelector('.newplace')")
+    A.evaluate("Promise.all(PLACES.filter((p) => p.own).map((p) => callServer('deletePlace', p.id))).then(() => refreshExpenses())")
     A.wait_for_function("!PLACES.some((p) => p.own)")
 
     check(not errs, f'no page errors {errs}')

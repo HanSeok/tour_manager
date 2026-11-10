@@ -29,6 +29,35 @@ type Result struct {
 	Layer   string  `json:"layer,omitempty"`   // suggested category, when the source says what the place is
 	Address string  `json:"address,omitempty"` // street address, when the source gives one
 	Link    string  `json:"link,omitempty"`    // the link worth keeping to open the place again (photos, reviews …)
+	Hours   Hours   `json:"hours,omitempty"`   // opening hours, when the source gives them (nil = unknown)
+}
+
+// Hours are opening hours as the dashboard's route planner reads them: weekday (0 = Sunday) → [open, close] minutes since
+// midnight, a close after midnight counted on (+1440). A weekday with an empty list is closed; a missing weekday, or a nil
+// Hours, is unknown. Only complete, readable hours are ever kept: wrong hours would be worse than none.
+type Hours map[int][][2]int
+
+const (
+	maxRangesPerDay = 4
+	maxMinute       = 2880 // 48 h: a range may run past midnight into the next day
+)
+
+// CleanHours checks hours that came from a browser before they are stored. Empty hours mean unknown.
+func CleanHours(h Hours) (Hours, bool) {
+	if len(h) == 0 {
+		return nil, true
+	}
+	for wd, ranges := range h {
+		if wd < 0 || wd > 6 || len(ranges) > maxRangesPerDay {
+			return nil, false
+		}
+		for _, r := range ranges {
+			if r[0] < 0 || r[1] <= r[0] || r[1] > maxMinute {
+				return nil, false
+			}
+		}
+	}
+	return h, true
 }
 
 // MaxLinkLen is the longest link that is stored with a place.
