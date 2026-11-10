@@ -25,6 +25,7 @@ import (
 	"tourmanager/internal/members"
 	"tourmanager/internal/places"
 	"tourmanager/internal/sheets"
+	"tourmanager/internal/state"
 	"tourmanager/internal/trips"
 )
 
@@ -309,6 +310,7 @@ func New(cfg Config) (http.Handler, error) {
 		Expenses: &expenses.Service{Grid: grid, Log: &audit.GridLog{Grid: grid}},
 		Links:    &maplink.Resolver{HTTP: &http.Client{Timeout: 8 * time.Second}},
 		Places:   &places.Service{Grid: grid, Log: &audit.GridLog{Grid: grid}},
+		State:    &state.Service{Grid: grid, Log: &audit.GridLog{Grid: grid}},
 		Trips:    tripManager(tripSvc),
 	}).Register(rt)
 

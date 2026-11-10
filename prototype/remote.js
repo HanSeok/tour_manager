@@ -14,7 +14,20 @@ const whoName = (email) => {
   const m = MEMBERS[String(email || '').toLowerCase()];
   return m ? m.name : String(email || '').split('@')[0];
 };
-const SYNC_KEYS = ['routes', 'starts', 'startFrom', 'eventPlace'];
+// The Go server also shares the visit records; the Apps Script server keeps only the four plan keys.
+const SYNC_KEYS = IS_API ? ['routes', 'starts', 'startFrom', 'eventPlace', 'visits'] : ['routes', 'starts', 'startFrom', 'eventPlace'];
+// A key whose local shape is not {sub-key: value}: visits are a flat list here, but shared per day ({date: [records]}) so
+// that two companions marking different days merge instead of overwriting each other.
+const SHARED_CODEC = {
+  visits: {
+    enc: (list) => (Array.isArray(list) ? list : []).reduce((acc, v) => ({ ...acc, [v.date]: [...(acc[v.date] || []), v] }), {}),
+    dec: (byDay) => Object.keys(byDay || {}).sort().flatMap((d) => byDay[d]),
+  },
+};
+const toShared = (key, value) => (SHARED_CODEC[key] ? SHARED_CODEC[key].enc(value) : value);
+const fromShared = (key, value) => (SHARED_CODEC[key] ? SHARED_CODEC[key].dec(value) : value);
+// A viewer's browser never writes the shared plan.
+const canSyncShared = () => !IS_API || CAN_EDIT;
 const SYNC_DELAY_MS = 400;
 const TRAVEL_BATCH = 25;
 const TRAFFIC_BUCKET_MIN = 60; // traffic-aware times are looked up per departure hour
@@ -87,12 +100,12 @@ const dirtyKeys = () => store.get(DIRTY, []).filter((k) => SYNC_KEYS.includes(k)
 const setDirty = (key, isDirty) => store.set(DIRTY, [...new Set([...dirtyKeys().filter((k) => k !== key), ...(isDirty ? [key] : [])])]);
 
 function syncState(key, value) {
-  if (!IS_GAS || !SYNC_KEYS.includes(key)) return;
+  if (!IS_SERVER || !SYNC_KEYS.includes(key) || !canSyncShared()) return;
   setDirty(key, true);
   clearTimeout(syncTimers[key]);
   syncTimers[key] = setTimeout(() => {
     delete syncTimers[key];
-    const patch = diffPatch(synced[key], value);
+    const patch = diffPatch(synced[key], toShared(key, value));
     if (!Object.keys(patch).length) { setDirty(key, false); return; }
     syncInFlight.add(key);
     callWrite('saveState', key, patch)
@@ -104,7 +117,7 @@ function syncState(key, value) {
         }
         setSyncedKey(key, merged); // nothing newer locally → adopt the server view (companions' days too)
         setDirty(key, false);
-        adoptShared(key, merged);
+        adoptShared(key, fromShared(key, merged));
       })
       .catch((e) => { syncInFlight.delete(key); showError(`동선 저장 실패: ${e.message}`); });
   }, SYNC_DELAY_MS);

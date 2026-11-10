@@ -13,6 +13,7 @@ import (
 	"tourmanager/internal/members"
 	"tourmanager/internal/places"
 	"tourmanager/internal/sheets"
+	"tourmanager/internal/state"
 	"tourmanager/internal/tripconfig"
 	"tourmanager/internal/trips"
 )
@@ -29,6 +30,7 @@ type Trip struct {
 	Conn     func(ctx context.Context) (bool, string) // is the owner connected to Google? (for the diagnose screen)
 	Links    PlaceLinks                               // reads a Google Maps share link (nil = not available)
 	Places   *places.Service                          // places members add themselves (nil = none, e.g. in tests)
+	State    *state.Service                           // what companions plan together: routes, starts, visits (nil = not kept on the server)
 	Trips    TripManager                              // creates trips in the owner's Google Drive (nil = not available, e.g. sample data)
 
 	mu    sync.Mutex
@@ -52,6 +54,7 @@ func (t *Trip) Register(rt *Router) {
 	rt.Register("addPlace", PermWrite, t.AddPlace)
 	rt.Register("updatePlace", PermWrite, t.UpdatePlace)
 	rt.Register("deletePlace", PermWrite, t.DeletePlace)
+	rt.Register("saveState", PermWrite, t.SaveState)
 }
 
 // LoadConfig reads and validates the 설정 tab. A missing tab is reported as "not configured", not as a failure.
@@ -127,8 +130,11 @@ func (t *Trip) Bootstrap(ctx context.Context, who Principal, _ []json.RawMessage
 	}
 	// Collections not ported yet stay empty; the shape matches what the dashboard already expects.
 	out := base(cfg)
-	out["events"], out["expenses"], out["state"], out["places"] = []any{}, list, map[string]any{}, nil
+	out["events"], out["expenses"], out["places"] = []any{}, list, nil
 	out["sample"], out["visits"], out["photos"] = t.Sample, []any{}, []any{}
+	if out["state"], err = t.sharedState(ctx, cfg); err != nil {
+		return nil, sheetErr("bootstrap", err)
+	}
 	t.addTripChoice(who, out)
 	if cfg.Configured() {
 		if out["tripPlaces"], err = t.placeList(ctx); err != nil {
@@ -182,7 +188,11 @@ func (t *Trip) Refresh(ctx context.Context, _ Principal, _ []json.RawMessage) (a
 	if err != nil {
 		return nil, sheetErr("refresh", err)
 	}
-	return map[string]any{"state": map[string]any{}, "expenses": list, "events": []any{}, "tripPlaces": pl}, nil
+	st, err := t.sharedState(ctx, cfg)
+	if err != nil {
+		return nil, sheetErr("refresh", err)
+	}
+	return map[string]any{"state": st, "expenses": list, "events": []any{}, "tripPlaces": pl}, nil
 }
 
 // sheetErr turns a storage failure into a safe message (details go to the log, not to the browser).
@@ -190,8 +200,11 @@ func sheetErr(op string, err error) error {
 	var ve *expenses.ValidationError
 	var ee *expenses.Error
 	var pv *places.ValidationError
+	var sv *state.ValidationError
 	var pe *places.Error
 	switch {
+	case errors.As(err, &sv):
+		return Errf(422, sv.Msg)
 	case errors.As(err, &pv):
 		return Errf(422, pv.Msg)
 	case errors.As(err, &pe) && pe.Kind == places.NotFound:

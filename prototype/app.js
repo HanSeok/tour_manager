@@ -949,6 +949,27 @@ function showSetup(cfg, checks, connect, newTrip, tripDefaults, tripPresets) {
     ${IS_API ? '' : '<p>자세한 안내: 스프레드시트의 <b>안내</b> 탭</p>'}</section>`;
 }
 
+/** First time this browser meets a server that keeps the plan: days it planned before (kept only here until now) and the
+ *  server does not have yet are sent up, so switching to the shared plan does not throw away what was already made. */
+function keepLocalDays(remote) {
+  SYNC_KEYS.forEach((k) => {
+    const mine = toShared(k, store.get(k, k in PERSISTED_DEFAULT ? PERSISTED_DEFAULT[k] : {}));
+    const onlyHere = Object.fromEntries(Object.entries(mine).filter(([d]) => (k === 'eventPlace' || DATES.includes(d)) && !(remote[k] && d in remote[k])));
+    if (!Object.keys(onlyHere).length) return;
+    store.set(k, fromShared(k, onlyHere));
+    setDirty(k, true);
+  });
+}
+
+/** Companions' changes: every key = the server value + this page's unsent edits (rebase). Keys being saved wait for their reply. */
+function mergeRemoteState(remote) {
+  const keys = SYNC_KEYS.filter((k) => !syncInFlight.has(k));
+  const fresh = Object.fromEntries(keys.map((k) => [k, fromShared(k, rebase(synced[k], toShared(k, state[k]), remote[k]))]));
+  keys.forEach((k) => setSyncedKey(k, remote[k] || {}));
+  state = { ...state, ...fresh };
+  keys.filter((k) => dirtyKeys().includes(k)).forEach((k) => syncState(k, state[k])); // retry a previously failed save
+}
+
 // placeList: app-shaped places (prototype passes samples; Apps Script converts My Maps placemarks).
 function startApp(res, placeList, { isStale = false } = {}) {
   applyConfig(res.config);
@@ -956,12 +977,13 @@ function startApp(res, placeList, { isStale = false } = {}) {
   setPlaces(placeList || mm.places.map(placeFromMyMaps));
   loadEvents(res.events);
   const remote = res.state || {};
-  const shared = Object.fromEntries(SYNC_KEYS.filter((k) => k in remote).map((k) => [k, remote[k]]));
+  const shared = Object.fromEntries(SYNC_KEYS.filter((k) => k in remote).map((k) => [k, fromShared(k, remote[k])]));
+  if (IS_API && !isStale && canSyncShared() && store.get(SYNCED, null) === null) keepLocalDays(remote);
   // Keys with unsent local edits (failed save, tab closed within the debounce): the edit is rebased onto the fresh
   // server value and re-sent — only the user's own change, never a diff that would delete companions' days.
-  const dirty = isStale ? [] : dirtyKeys();
+  const dirty = isStale || !canSyncShared() ? [] : dirtyKeys();
   const oldSynced = store.get(SYNCED, {});
-  const localDirty = Object.fromEntries(dirty.map((k) => [k, rebase(oldSynced[k], store.get(k, {}), remote[k])]));
+  const localDirty = Object.fromEntries(dirty.map((k) => [k, fromShared(k, rebase(oldSynced[k], toShared(k, store.get(k, k in PERSISTED_DEFAULT ? PERSISTED_DEFAULT[k] : {})), remote[k]))]));
   if (!isStale) setSynced(remote);
   state = { ...state, ...shared, ...localDirty, expenses: res.expenses, isStale, bootFailed: false };
   if (!isStale) SYNC_KEYS.filter((k) => !dirty.includes(k)).forEach((k) => store.set(k, state[k])); // the stale copy never overwrites local data
@@ -971,7 +993,7 @@ function startApp(res, placeList, { isStale = false } = {}) {
   const update = v && v.latest && v.latest !== v.current
     ? ` · <a href="${UPDATE_GUIDE_URL}" target="_blank" rel="noopener">새 버전 ${esc(v.latest)} 있음 (지금 ${esc(v.current)}) → 업데이트 방법</a>` : '';
   const parts = IS_API
-    ? [`${ME.name} (${ROLE_LABEL[ME.role]})`, res.sample ? '일정·장소는 샘플(개발용)' : `일정 연동은 준비 중 · 장소 ${(res.tripPlaces || []).length}곳${CAN_EDIT ? ' (지도를 눌러 추가)' : ''}`, '지출·장소는 서버에 저장 · 동선은 이 브라우저에만 저장', ...(CAN_EDIT ? [] : ['보기 전용'])]
+    ? [`${ME.name} (${ROLE_LABEL[ME.role]})`, res.sample ? '일정·장소는 샘플(개발용)' : `일정 연동은 준비 중 · 장소 ${(res.tripPlaces || []).length}곳${CAN_EDIT ? ' (지도를 눌러 추가)' : ''}`, '지출·장소·동선은 서버에 저장 (동행과 공유)', ...(CAN_EDIT ? [] : ['보기 전용'])]
     : [isStale ? '지난번 데이터' : `캘린더 일정 ${res.events.length}개`, placeNote, ...airportNote, ...(mm.notes || []), CAN_EDIT ? '동선은 모두에게 공유 저장' : '보기 전용'];
   showBanner(parts.map(esc).join(' · ') + update);
   render();
@@ -986,11 +1008,12 @@ function adoptShared(key, value) {
 }
 
 /** Companions' changes: re-read on return to the tab and every few minutes. Keys with a pending save stay local. */
-/** Go server: only the expenses come from the server for now (routes, events and places stay in this browser). */
+/** Go server: expenses, places and the shared plan come from the server (the calendar is not ported yet). */
 function refreshExpenses() {
   return callServer('refresh')
     .then((res) => {
       if (res.tripPlaces) applyTripPlaces(res.tripPlaces);
+      mergeRemoteState(res.state || {});
       state = { ...state, expenses: state.saving ? state.expenses : res.expenses }; render();
     })
     .catch((e) => console.warn(`refresh failed: ${e.message}`));
@@ -1001,14 +1024,9 @@ function refreshShared() {
   if (!IS_SERVER || state.isStale || document.hidden || document.querySelector('.setup')) return; // not while the new-trip form replaces the dashboard
   if (IS_API) { refreshExpenses(); return; }
   callServer('refresh').then((res) => {
-    const remote = res.state || {};
-    // in-flight keys wait for their own response; every other key = server value + this page's unsent edits (rebase)
-    const keys = SYNC_KEYS.filter((k) => !syncInFlight.has(k));
-    const fresh = Object.fromEntries(keys.map((k) => [k, rebase(synced[k], state[k], remote[k])]));
-    keys.forEach((k) => setSyncedKey(k, remote[k] || {}));
+    mergeRemoteState(res.state || {});
     loadEvents(res.events);
-    state = { ...state, ...fresh, expenses: state.saving ? state.expenses : res.expenses };
-    keys.filter((k) => dirtyKeys().includes(k)).forEach((k) => syncState(k, state[k])); // retry a previously failed save
+    state = { ...state, expenses: state.saving ? state.expenses : res.expenses };
     render();
   }).catch((e) => console.warn(`refresh failed: ${e.message}`));
 }

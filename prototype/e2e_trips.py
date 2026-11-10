@@ -20,6 +20,9 @@ def check(ok, msg):
         fails.append(msg)
 
 
+PLANS = {'a': {'routes': {'2027-04-10': [{'id': 'x'}]}}, 'b': {}}
+
+
 def open_page(browser, email, st):
     ctx = browser.new_context(viewport={'width': 1000, 'height': 900})
     page = ctx.new_page()
@@ -34,6 +37,13 @@ def open_page(browser, email, st):
         if d['me']['role'] == 'owner':
             d['trips'] = TRIPS
         d['config']['title'] = {'a': '오사카', 'b': '제주'}[st['current']]
+        d['state'] = PLANS[st['current']]  # each trip has its own spreadsheet, so its own shared plan
+        route.fulfill(response=resp, body=json.dumps(body))
+
+    def refresh(route):
+        resp = route.fetch()
+        body = resp.json()
+        body['data']['state'] = PLANS[st['current']]
         route.fulfill(response=resp, body=json.dumps(body))
 
     def switch(route):
@@ -44,6 +54,7 @@ def open_page(browser, email, st):
         route.fulfill(status=200, content_type='application/json', body=json.dumps({'ok': True, 'data': {'current': st['sent']}}))
 
     page.route('**/api/bootstrap', bootstrap)
+    page.route('**/api/refresh', refresh)
     page.route('**/api/switchTrip', switch)
     page.goto(f'{BASE}auth/dev?email={email}')
     return ctx, page
