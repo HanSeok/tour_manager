@@ -21,6 +21,9 @@ var ErrNoSheet = errors.New("sheet not found")
 // ErrNotConnected means the owner has not connected Google yet, so the spreadsheet cannot be reached.
 var ErrNotConnected = errors.New("소유자 Google 연결이 필요합니다 (소유자로 로그인한 뒤 /auth/owner 를 여세요)")
 
+// ErrNoTrip means no trip spreadsheet exists yet: the owner creates one from the dashboard.
+var ErrNoTrip = errors.New("아직 여행이 없습니다 (소유자가 '새 여행 만들기'로 만드세요)")
+
 // Source gives the rows of the settings and members tabs. A nil slice with a nil error is not used:
 // a missing tab is ErrNoSheet, an empty tab is an empty slice.
 type Source interface {

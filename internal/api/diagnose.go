@@ -41,6 +41,8 @@ func (t *Trip) checks(ctx context.Context) []Check {
 	switch {
 	case errors.Is(err, sheets.ErrNotConnected):
 		return append(out, no("시트 접근", sheets.ErrNotConnected.Error()))
+	case errors.Is(err, sheets.ErrNoTrip):
+		return append(out, no("여행", sheets.ErrNoTrip.Error()))
 	case errors.Is(err, sheets.ErrNoSheet):
 		out = append(out, yes("시트 접근", "스프레드시트를 열었습니다"))
 		cfg = tripconfig.Parse(nil, false)

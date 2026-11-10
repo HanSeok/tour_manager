@@ -130,7 +130,6 @@ func TestConfigValidation(t *testing.T) {
 		"short secret":        func(c *Config) { c.SessionSecret = []byte("short") },
 		"dev login on public": func(c *Config) { c.DevLogin = true; c.ClientID = "" },
 		"no google client":    func(c *Config) { c.ClientID = "" },
-		"no sheet":            func(c *Config) { c.SpreadsheetID = "" },
 		"no owner":            func(c *Config) { c.OwnerEmail = "" },
 		"bad url":             func(c *Config) { c.BaseURL = "trip.example.com" },
 	}

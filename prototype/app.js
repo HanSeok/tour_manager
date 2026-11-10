@@ -559,6 +559,7 @@ function render() {
 
 function handleButton(ds) {
   if (ds.setupSettings) return runSetupSettings();
+  if (ds.createTrip) return runCreateTrip();
   if (ds.tab) return setState({ tab: ds.tab, tabChosen: true });
   if (ds.date) return setState({ date: ds.date });
   if (ds.goto) return setState({ tab: 'route', date: ds.goto });
@@ -655,6 +656,8 @@ document.addEventListener('input', (e) => {
 });
 document.addEventListener('change', (e) => {
   const t = e.target;
+  if (t.id === 'nt-preset') return applyPreset(t.value);
+  if (t.closest('.setup')) return; // the setup screen (new-trip form) has no dashboard to re-render
   if (t.id === 'expDate') return setState({ draft: { ...state.draft, date: t.value === PRE_TRIP ? preTripDate() : t.value } });
   if (!isEditable()) return render(); // read-only: snap inputs back
   if (t.dataset.stay !== undefined) {
@@ -709,7 +712,53 @@ function runSetupSettings() {
     .catch((e) => showError(`설정 탭을 만들지 못했습니다: ${e.message}`));
 }
 
-function showSetup(cfg, checks, connect) {
+// Go server, no trip yet: the owner fills this in and the server creates the Drive folder + spreadsheet itself
+// [key, label, input type, placeholder, required]. A blank optional field gets the greyed-out default: the server holds the
+// defaults (res.tripDefaults) and applies them itself, so what the form shows is what is saved.
+const NEW_TRIP_FIELDS = [
+  ['title', '여행 제목', 'text', '예: 오키나와 2027', true], ['start', '시작일', 'date', '', true], ['end', '종료일', 'date', '', true],
+  ['timezone', '현지 시간대', 'text', '', false], ['localCurrency', '현지 통화 이름', 'text', '', false],
+  ['localSymbol', '현지 통화 기호', 'text', '', false], ['rate', '환율 (현지 1 = 원)', 'text', '', false],
+  ['destKeywords', '목적지 키워드', 'text', '비우면 여행 제목', false], ['payers', '결제자 (쉼표로)', 'text', '', false],
+];
+
+let NEW_TRIP_PRESETS = []; // destinations the server offers: {name, timezone, currency, symbol, rate}
+const PRESET_FIELDS = { timezone: 'timezone', localCurrency: 'currency', localSymbol: 'symbol', rate: 'rate' }; // form field → preset key
+const DATALISTS = { timezone: 'timezone', localCurrency: 'currency', localSymbol: 'symbol' };
+
+function applyPreset(i) {
+  const p = NEW_TRIP_PRESETS[i];
+  if (!p) return;
+  Object.entries(PRESET_FIELDS).forEach(([field, key]) => { $(`#nt-${field}`).value = p[key]; });
+}
+
+const presetPicker = () => NEW_TRIP_PRESETS.length
+  ? `<label>여행지 (고르면 시간대·통화·환율이 채워집니다)<select id="nt-preset"><option value="">직접 입력</option>${NEW_TRIP_PRESETS.map((p, i) => `<option value="${i}">${esc(p.name)}</option>`).join('')}</select></label>` : '';
+const suggestions = (key) => [...new Set(NEW_TRIP_PRESETS.map((p) => p[key]))].map((v) => `<option value="${esc(v)}"></option>`).join('');
+
+const newTripForm = (defaults = {}) => `<h2>새 여행 만들기</h2>
+  <p>내 Google Drive 의 <b>여행 대시보드/&lt;여행 제목&gt;/</b> 폴더에 스프레드시트와 사진 폴더를 만듭니다.</p>
+  <p class="regnote">* 는 필수입니다. 나머지는 비워 두면 흐린 글씨의 기본값이 저장됩니다. 환율은 대략값이니 출발 전에 확인해 고치세요.</p>
+  <div class="newtrip">${presetPicker()}${NEW_TRIP_FIELDS.map(([k, label, type, ph, req]) => `<label>${esc(label)}${req ? ' *' : ''}<input id="nt-${k}" type="${type}" placeholder="${esc(defaults[k] || ph)}"${DATALISTS[k] ? ` list="nt-dl-${k}"` : ''}></label>`).join('')}</div>
+  ${Object.keys(DATALISTS).map((k) => `<datalist id="nt-dl-${k}">${suggestions(DATALISTS[k])}</datalist>`).join('')}
+  <p><button class="submit" data-create-trip="1">여행 만들기</button></p>`;
+
+function runCreateTrip() {
+  const req = Object.fromEntries(NEW_TRIP_FIELDS.map(([k]) => [k, ($(`#nt-${k}`).value || '').trim()]));
+  const btn = $('[data-create-trip]');
+  btn.disabled = true; btn.textContent = '만드는 중…';
+  callServer('createTrip', req)
+    .then(() => location.reload())
+    .catch((e) => { btn.disabled = false; btn.textContent = '여행 만들기'; showError(`여행을 만들지 못했습니다: ${e.message}`); });
+}
+
+function showSetup(cfg, checks, connect, newTrip, tripDefaults, tripPresets) {
+  NEW_TRIP_PRESETS = tripPresets || [];
+  if (newTrip && IS_API && ME && ME.role === 'owner') {
+    showBanner('새 여행을 만들어 주세요');
+    $('.layout').innerHTML = `<section class="setup">${newTripForm(tripDefaults)}${checks ? `<h2>자가 점검</h2>${checksList(checks)}` : ''}</section>`;
+    return;
+  }
   // `connect` (Go server): the owner has not linked Google yet, so listing empty settings would only mislead
   const items = connect ? '' : [...cfg.missing.map((m) => `<li><b>${esc(m)}</b> 값이 비어 있습니다</li>`), ...cfg.invalid.map((m) => `<li>${esc(m)}</li>`)].join('');
   showBanner(connect ? 'Google 연결이 필요합니다' : '설정이 필요합니다');
@@ -796,7 +845,7 @@ function boot(retriesLeft) {
         if (IS_API) ME = res.me; // the setup screen offers owner-only actions
         state = { ...state, isStale: false };
         $('#roNote').hidden = true;
-        return showSetup(cfg, res.checks, res.connect);
+        return showSetup(cfg, res.checks, res.connect, res.newTrip, res.tripDefaults, res.tripPresets);
       }
       if (IS_API) {
         ME = res.me;

@@ -113,6 +113,19 @@ func (a *API) UpdateRow(ctx context.Context, tab string, n int, row []any) error
 	return err
 }
 
+// PutRows writes several rows starting at row n in one call (RAW, like every write here).
+func (a *API) PutRows(ctx context.Context, tab string, n int, rows [][]any) error {
+	if n < 1 {
+		return errors.New("row must be >= 1")
+	}
+	if len(rows) == 0 {
+		return nil
+	}
+	rng := url.PathEscape(quoteTab(tab) + "!A" + strconv.Itoa(n))
+	_, err := a.call(ctx, http.MethodPut, a.sheetPath("/values/"+rng+"?valueInputOption=RAW"), map[string]any{"values": rows}, nil)
+	return err
+}
+
 type tabInfo struct {
 	SheetID int64
 	Title   string
@@ -154,6 +167,27 @@ func (a *API) DeleteRow(ctx context.Context, tab string, n int) error {
 		}
 	}
 	return ErrNoSheet
+}
+
+// RenameFirstTab renames the first tab (the empty "시트1" a new spreadsheet comes with) so no blank tab is left over.
+// A tab that already has the wanted name is left alone.
+func (a *API) RenameFirstTab(ctx context.Context, title string) error {
+	list, err := a.tabs(ctx)
+	if err != nil {
+		return err
+	}
+	if len(list) == 0 {
+		return nil
+	}
+	for _, t := range list {
+		if t.Title == title {
+			return nil
+		}
+	}
+	req := map[string]any{"requests": []any{map[string]any{"updateSheetProperties": map[string]any{
+		"properties": map[string]any{"sheetId": list[0].SheetID, "title": title}, "fields": "title"}}}}
+	_, err = a.call(ctx, http.MethodPost, a.sheetPath(":batchUpdate"), req, nil)
+	return err
 }
 
 func (a *API) EnsureTab(ctx context.Context, tab string, header []string) (bool, error) {
@@ -281,6 +315,29 @@ func (g *MemGrid) UpdateRow(_ context.Context, tab string, n int, row []any) err
 	rows[n-1] = cells(row)
 	return nil
 }
+
+func (g *MemGrid) PutRows(_ context.Context, tab string, n int, rows [][]any) error {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	cur, ok := g.tabs[tab]
+	if !ok {
+		return ErrNoSheet
+	}
+	if n < 1 || n > len(cur)+1 {
+		return fmt.Errorf("row %d out of range", n)
+	}
+	for i, r := range rows {
+		if n-1+i < len(cur) {
+			cur[n-1+i] = cells(r)
+		} else {
+			cur = append(cur, cells(r))
+		}
+	}
+	g.tabs[tab] = cur
+	return nil
+}
+
+func (g *MemGrid) RenameFirstTab(context.Context, string) error { return nil } // a MemGrid has no default tab
 
 func (g *MemGrid) DeleteRow(_ context.Context, tab string, n int) error {
 	g.mu.Lock()

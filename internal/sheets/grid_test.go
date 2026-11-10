@@ -66,6 +66,27 @@ func (f *fakeSheets) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				f.next++
 				f.ids[a.Properties.Title], f.tabs[a.Properties.Title] = f.next, nil
 			}
+			if raw, ok := q["updateSheetProperties"]; ok {
+				var u struct {
+					Properties struct {
+						SheetID int64  `json:"sheetId"`
+						Title   string `json:"title"`
+					} `json:"properties"`
+					Fields string `json:"fields"`
+				}
+				_ = json.Unmarshal(raw, &u)
+				old := ""
+				for t, id := range f.ids {
+					if id == u.Properties.SheetID && u.Fields == "title" {
+						old = t
+					}
+				}
+				if old != "" {
+					f.ids[u.Properties.Title], f.tabs[u.Properties.Title] = f.ids[old], f.tabs[old]
+					delete(f.ids, old)
+					delete(f.tabs, old)
+				}
+			}
 			if raw, ok := q["deleteDimension"]; ok {
 				var d struct {
 					Range struct {
@@ -113,10 +134,12 @@ func (f *fakeSheets) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			var b struct{ Values [][]any }
 			_ = json.NewDecoder(r.Body).Decode(&b)
 			n, _ := strconv.Atoi(strings.TrimPrefix(a1, "A"))
-			for len(f.tabs[tab]) < n {
+			for len(f.tabs[tab]) < n-1+len(b.Values) {
 				f.tabs[tab] = append(f.tabs[tab], nil)
 			}
-			f.tabs[tab][n-1] = b.Values[0]
+			for i, v := range b.Values {
+				f.tabs[tab][n-1+i] = v
+			}
 			reply(200, map[string]any{})
 		default:
 			fail(405, "bad call")
@@ -205,5 +228,71 @@ func TestLoadFixtures(t *testing.T) {
 	rows, err := g.Rows(context.Background(), "설정")
 	if err != nil || len(rows) < 5 {
 		t.Fatalf("%v %v", rows, err)
+	}
+}
+
+func TestRenameFirstTabTurnsTheDefaultTabIntoTheSettingsTab(t *testing.T) {
+	f, srv := newFake()
+	defer srv.Close()
+	f.ids["시트1"], f.tabs["시트1"] = 7, nil // what a brand new spreadsheet has
+	a := &API{HTTP: srv.Client(), Base: srv.URL, SpreadsheetID: "sid"}
+
+	if err := a.RenameFirstTab(context.Background(), "설정"); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.ids["설정"]; !ok || len(f.ids) != 1 {
+		t.Fatalf("tabs after rename: %v", f.ids)
+	}
+	// the renamed tab is usable as the settings tab, and no second tab is created
+	if created, err := a.EnsureTab(context.Background(), "설정", []string{"항목", "값", "설명"}); err != nil || created {
+		t.Fatalf("EnsureTab created=%v err=%v", created, err)
+	}
+	if len(f.ids) != 1 {
+		t.Errorf("tabs: %v", f.ids)
+	}
+}
+
+func TestRenameFirstTabLeavesAnExistingTabAlone(t *testing.T) {
+	f, srv := newFake()
+	defer srv.Close()
+	f.ids["설정"], f.tabs["설정"] = 7, [][]any{{"항목", "값", "설명"}}
+	a := &API{HTTP: srv.Client(), Base: srv.URL, SpreadsheetID: "sid"}
+	if err := a.RenameFirstTab(context.Background(), "설정"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.tabs["설정"]) != 1 {
+		t.Errorf("content changed: %v", f.tabs)
+	}
+}
+
+func TestPutRowsWritesManyRowsInOneRawCall(t *testing.T) {
+	f, srv := newFake()
+	defer srv.Close()
+	f.ids["설정"], f.tabs["설정"] = 7, [][]any{{"항목", "값", "설명"}}
+	a := &API{HTTP: srv.Client(), Base: srv.URL, SpreadsheetID: "sid"}
+
+	err := a.PutRows(context.Background(), "설정", 2, [][]any{{"여행 제목", "=1+1", "x"}, {"시작일", "2027-04-10", "y"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(f.tabs["설정"]) != 3 || f.tabs["설정"][1][1] != "=1+1" || f.tabs["설정"][2][0] != "시작일" {
+		t.Errorf("rows = %v", f.tabs["설정"])
+	}
+	if !reflect.DeepEqual(f.queries, []string{"RAW"}) {
+		t.Errorf("must be exactly one RAW write, got %v", f.queries)
+	}
+}
+
+func TestMemGridPutRows(t *testing.T) {
+	g := NewMemGrid(map[string][][]string{"설정": {{"항목", "값"}}})
+	if err := g.PutRows(context.Background(), "설정", 2, [][]any{{"a", 1.0}, {"b", "c"}}); err != nil {
+		t.Fatal(err)
+	}
+	rows, _ := g.Rows(context.Background(), "설정")
+	if !reflect.DeepEqual(rows, [][]string{{"항목", "값"}, {"a", "1"}, {"b", "c"}}) {
+		t.Errorf("rows = %v", rows)
+	}
+	if err := g.PutRows(context.Background(), "없는탭", 2, [][]any{{"a"}}); !errors.Is(err, ErrNoSheet) {
+		t.Errorf("missing tab: %v", err)
 	}
 }

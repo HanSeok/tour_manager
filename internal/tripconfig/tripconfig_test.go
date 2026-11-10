@@ -192,3 +192,44 @@ func TestDatesAndTimesTheSheetTurnedIntoNumbers(t *testing.T) {
 		}
 	}
 }
+
+func TestRowsForFillsTheTemplateAndParsesBack(t *testing.T) {
+	rows := RowsFor(map[string]string{
+		"title": "오키나와", "start": "2027-04-10", "end": "2027-04-14", "timezone": "Asia/Tokyo",
+		"destKeywords": "오키나와, 나하", "myMapsUrl": "https://www.google.com/maps/d/edit?mid=SAMPLE", "localCurrency": "엔", "localSymbol": "¥", "rate": "9.3",
+	})
+	cfg := Parse(rows, true)
+	if !cfg.Configured() {
+		t.Fatalf("not configured: missing=%v invalid=%v", cfg.Missing, cfg.Invalid)
+	}
+	if cfg.Title != "오키나와" || cfg.Days != 5 || cfg.Rate != 9.3 || cfg.LocalSymbol != "¥" {
+		t.Errorf("cfg = %+v", cfg)
+	}
+	// untouched settings keep the template default and description
+	if len(rows) != len(TemplateRows()) || rows[0][0] != "항목" {
+		t.Errorf("shape differs from the template: %d rows", len(rows))
+	}
+	if cfg.ExpenseSheet != "여행_지출" {
+		t.Errorf("default lost: %q", cfg.ExpenseSheet)
+	}
+}
+
+func TestRowsForIgnoresUnknownKeysAndDoesNotTouchTheTemplate(t *testing.T) {
+	before := TemplateRows()[1][1]
+	RowsFor(map[string]string{"title": "x", "nope": "y"})
+	if TemplateRows()[1][1] != before {
+		t.Error("template mutated")
+	}
+	for _, r := range RowsFor(map[string]string{"nope": "y"}) {
+		if r[1] == "y" {
+			t.Error("unknown key written")
+		}
+	}
+}
+
+func TestRowsForFlagsWhatIsStillMissing(t *testing.T) {
+	cfg := Parse(RowsFor(map[string]string{"title": "x"}), true)
+	if cfg.Configured() || len(cfg.Missing) == 0 {
+		t.Errorf("a trip with only a title must not look configured: %+v", cfg.Missing)
+	}
+}

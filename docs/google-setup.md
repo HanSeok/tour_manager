@@ -6,7 +6,19 @@
 - **소유자 Google 계정**: 개인 Gmail 을 권장합니다. 회사·학교(Workspace) 계정은 관리자 정책이 외부 앱 연결을 막을 수 있습니다.
 - 여행 스프레드시트 하나.
 
-## 1. 스프레드시트
+## 1. 스프레드시트 — 두 가지 방법
+
+### 방법 A (권장): 서버가 만들어 줍니다
+- `TRIP_SHEET_ID` 를 **비워 둡니다**. 소유자로 로그인해서 Google 연결을 하면 "새 여행 만들기" 화면이 나옵니다. 제목과 기간만 필수이고, **여행지**(일본·태국·프랑스 …)를 고르면 시간대·통화·기호·환율이 채워지고(각 칸에서 목록으로 따로 고를 수도 있음, 환율은 대략값), 비워 둔 칸은 폼에 흐리게 보이는 기본값(Asia/Tokyo, 엔, ¥, 9.3, 나·동행)이 저장됩니다. 서버가 내 Drive 에 만듭니다.
+  - `여행 대시보드/<여행 제목>/` 폴더 안에 스프레드시트(`설정`·`멤버`·`여행_지출`·`변경이력` 탭이 구성됨)와 `사진/` 폴더
+- 시트 ID 를 복사하거나 템플릿을 복사할 필요가 없습니다. 만든 여행 목록은 `DATA_DIR/trips.json` 에 있고, 가장 최근에 만든 여행이 대시보드에 표시됩니다.
+- 이 방법은 **drive.file** 범위만 씁니다(서버가 만든 파일만 접근, 민감 범위 아님). 그래서 직접 만든 기존 시트는 열 수 없습니다.
+- Google Cloud 에서 **Google Drive API** 와 **Google Sheets API** 를 둘 다 사용 설정해야 합니다(아래 2-2).
+
+### 방법 B: 내가 만든 시트를 쓰기
+`TRIP_SHEET_ID` 를 지정하면 이전처럼 그 시트를 씁니다(`spreadsheets` 범위). "새 여행 만들기"는 꺼집니다. 아래 1~4 단계를 따릅니다.
+
+(방법 B 의 준비)
 1. 둘 중 하나로 시작합니다.
    - **템플릿 사본**: README 의 **템플릿 사본 만들기** 링크로 내 Drive 에 사본을 만듭니다(`설정` 탭이 이미 있습니다).
    - **빈 스프레드시트**: 새 스프레드시트를 만들고 시트 ID 만 `.env` 에 넣습니다. 소유자로 로그인하면 설정 화면에 **"설정 탭 자동으로 만들기"** 버튼이 나옵니다(`설정` 탭이 없을 때만, 이미 있는 설정은 건드리지 않음).
@@ -16,10 +28,10 @@
 
 ## 2. Google Cloud 설정
 1. https://console.cloud.google.com 에서 **새 프로젝트** 를 만듭니다.
-2. **API 및 서비스 > 라이브러리** 에서 **Google Sheets API** 를 사용 설정합니다.
+2. **API 및 서비스 > 라이브러리** 에서 **Google Sheets API** 를 사용 설정합니다. 방법 A 는 **Google Drive API** 도 사용 설정합니다.
 3. **Google Auth platform(OAuth 동의 화면)**: 사용자 유형 **외부**, 앱 이름·지원 이메일 입력, 게시 상태는 **테스트** 로 둡니다.
    - **테스트 사용자** 에 소유자와 동행자의 Google 이메일을 모두 추가합니다. 목록에 없는 계정은 `403 access_denied` 로 막힙니다.
-   - 데이터 액세스(범위)에 `.../auth/spreadsheets` 를 추가합니다.
+   - 데이터 액세스(범위): 방법 A 는 `.../auth/drive.file`, 방법 B 는 `.../auth/spreadsheets` 를 추가합니다.
 4. **사용자 인증 정보 > 사용자 인증 정보 만들기 > OAuth 클라이언트 ID**, 유형 **웹 애플리케이션**:
    - **승인된 리디렉션 URI** 두 개를 등록합니다(서버를 시작하면 로그에 그대로 출력됩니다).
      - `http://localhost:8080/auth/callback`
@@ -28,7 +40,7 @@
 
 ## 3. 실행
 ```bash
-cp .env.example .env      # 값을 채운다: OWNER_EMAIL, SESSION_SECRET, GOOGLE_CLIENT_ID/SECRET, TRIP_SHEET_ID
+cp .env.example .env      # 값을 채운다: OWNER_EMAIL, SESSION_SECRET, GOOGLE_CLIENT_ID/SECRET (방법 B 만 TRIP_SHEET_ID)
 go run ./cmd/server
 ```
 1. 브라우저에서 `http://localhost:8080` → Google 로그인(소유자 계정).
@@ -47,6 +59,9 @@ go run ./cmd/server
 | 점검: "Google Sheets API has not been used … or it is disabled" | 2-2 의 Sheets API 사용 설정 |
 | 점검: "'설정' 탭이 없습니다" | 시트 ID 가 빈 스프레드시트(또는 다른 시트)를 가리킴. 설정 화면의 **설정 탭 자동으로 만들기** 를 누르거나, 템플릿 사본의 ID 를 쓰세요 |
 | 점검: 시트 접근 404 | `TRIP_SHEET_ID` 가 틀림 |
+| 새 여행 만들기: "Google Drive API has not been used … or it is disabled" | 2-2 에서 Google Drive API 사용 설정 |
+| 새 여행 만들기: 권한 부족(insufficient scopes) | 예전 연결(spreadsheets 범위)이 남아 있음 → `/auth/owner` 를 다시 열어 재동의(drive.file) |
+| 점검: "아직 여행이 없습니다" | 방법 A: 화면의 새 여행 만들기 폼을 작성 |
 | 점검: 시트 접근 403 | 소유자 계정이 그 시트를 볼 수 없음(다른 계정으로 연결했거나 공유 안 됨) |
 | 며칠 뒤 갑자기 시트를 못 읽음 | **테스트 모드의 Google 토큰은 7일 뒤 만료될 수 있음**(공식 문서로 확인) → 소유자가 `/auth/owner` 를 다시 열어 재연결. 장기 사용은 앱 게시 상태를 바꿔야 함 |
 | 점검: "연결되지 않았습니다" | 소유자 연결 전. `/auth/owner` |

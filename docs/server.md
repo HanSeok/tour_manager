@@ -29,7 +29,7 @@ FIXTURE_DIR=dev/fixtures STATIC_DIR=prototype go run ./cmd/server
 
 ## Google 연결 (실서비스)
 자세한 순서와 문제 해결 표: [`docs/google-setup.md`](google-setup.md). `.env.example` 를 `.env` 로 복사해 채운다(서버가 읽는다).
-환경변수: `BASE_URL`, `OWNER_EMAIL`, `SESSION_SECRET`(32자 이상), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TRIP_SHEET_ID`, `DATA_DIR`.
+환경변수: `BASE_URL`, `OWNER_EMAIL`, `SESSION_SECRET`(32자 이상), `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `TRIP_SHEET_ID`(선택: 비우면 대시보드에서 여행을 만듦, 목록은 `DATA_DIR/trips.json`), `DATA_DIR`.
 OAuth 클라이언트(웹)의 리디렉션 URI 두 개를 등록: `<BASE_URL>/auth/callback`, `<BASE_URL>/auth/owner/callback`.
 소유자로 로그인한 뒤 `<BASE_URL>/auth/owner` 를 열어 한 번 동의하면 refresh token 이 `DATA_DIR/owner_token.json`(0600)에 저장된다(임시 저장 방식, 암호화 안 됨).
 

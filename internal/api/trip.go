@@ -12,6 +12,7 @@ import (
 	"tourmanager/internal/members"
 	"tourmanager/internal/sheets"
 	"tourmanager/internal/tripconfig"
+	"tourmanager/internal/trips"
 )
 
 // Trip serves the trip-level functions: bootstrap, refresh and the expense calls. The rest of the contract
@@ -24,6 +25,7 @@ type Trip struct {
 	CfgTTL   time.Duration                            // how long a read of the 설정 tab is reused (0 = read every time)
 	Sample   bool                                     // development fixtures: the dashboard may show its sample calendar / places
 	Conn     func(ctx context.Context) (bool, string) // is the owner connected to Google? (for the diagnose screen)
+	Trips    TripManager                              // creates trips in the owner's Google Drive (nil = not available, e.g. sample data)
 
 	mu    sync.Mutex
 	cfg   tripconfig.Config
@@ -36,6 +38,8 @@ func (t *Trip) Register(rt *Router) {
 	rt.Register("refresh", PermRead, t.Refresh)
 	rt.Register("diagnose", PermManage, t.Diagnose)
 	rt.Register("setupSettings", PermManage, t.SetupSettings)
+	rt.Register("createTrip", PermManage, t.CreateTrip)
+	rt.Register("listTrips", PermManage, t.ListTrips)
 	rt.Register("addExpense", PermWrite, t.AddExpense)
 	rt.Register("updateExpense", PermWrite, t.UpdateExpense)
 	rt.Register("deleteExpense", PermWrite, t.DeleteExpense)
@@ -88,7 +92,15 @@ func (t *Trip) Bootstrap(ctx context.Context, who Principal, _ []json.RawMessage
 			if errors.Is(err, sheets.ErrNotConnected) {
 				out["connect"] = "/auth/owner"
 			}
+			if errors.Is(err, sheets.ErrNoTrip) {
+				out["newTrip"] = true
+				out["tripPresets"] = trips.Presets()
+				out["tripDefaults"] = trips.Defaults() // shown greyed out in the form; the server applies them to blank fields
+			}
 			return out, nil
+		}
+		if errors.Is(err, sheets.ErrNoTrip) {
+			return nil, Errf(503, "아직 여행이 없습니다. 소유자가 여행을 만들면 사용할 수 있습니다")
 		}
 		if errors.Is(err, sheets.ErrNotConnected) {
 			return nil, Errf(503, "소유자가 아직 Google 연결을 끝내지 않았습니다. 소유자에게 알려 주세요")

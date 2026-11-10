@@ -19,16 +19,20 @@ import (
 	"tourmanager/internal/api"
 	"tourmanager/internal/audit"
 	"tourmanager/internal/auth"
+	"tourmanager/internal/drive"
 	"tourmanager/internal/expenses"
 	"tourmanager/internal/members"
 	"tourmanager/internal/sheets"
+	"tourmanager/internal/trips"
 )
 
 const (
 	membersTTL = time.Minute      // a removed member loses access within about this long
 	configTTL  = 15 * time.Second // an edit of the 설정 tab shows up within about this long
-	// Sheets is the only Google scope the owner grants for now; calendar/drive are added when those features land.
+	// With a given TRIP_SHEET_ID the owner grants the broad Sheets scope (any spreadsheet by id). When the server creates the
+	// trips itself it only needs drive.file: access to the files the app created (a non-sensitive scope).
 	scopeSheets = "https://www.googleapis.com/auth/spreadsheets"
+	scopeDrive  = "https://www.googleapis.com/auth/drive.file"
 )
 
 type Config struct {
@@ -63,7 +67,8 @@ func (c Config) validate() error {
 	} else if c.ClientID == "" || c.ClientSecret == "" {
 		return errors.New("GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET 이 필요합니다 (개발 중이면 DEV_LOGIN=1)")
 	}
-	if c.FixtureDir == "" && c.SpreadsheetID == "" {
+	// without TRIP_SHEET_ID the owner creates the trips from the dashboard (needs the Google connection)
+	if c.FixtureDir == "" && c.SpreadsheetID == "" && c.ClientID == "" {
 		return errors.New("TRIP_SHEET_ID 가 필요합니다 (개발 중이면 FIXTURE_DIR)")
 	}
 	if c.Static == nil {
@@ -72,19 +77,38 @@ func (c Config) validate() error {
 	return nil
 }
 
-// ownerGrid reads and writes the spreadsheet with the owner's stored refresh token. Until the owner has connected
-// Google every call fails with a message that says what to do.
+// ownerGrid reads and writes the current trip's spreadsheet with the owner's stored refresh token. Until the owner has
+// connected Google every call fails with a message that says what to do. sheetID says which spreadsheet is current:
+// a fixed TRIP_SHEET_ID, or the newest trip in the registry ("" = no trip yet).
 type ownerGrid struct {
-	cfg           *oauth2.Config
-	tokens        auth.TokenStore
-	spreadsheetID string
+	cfg     *oauth2.Config
+	tokens  auth.TokenStore
+	sheetID func() (string, error)
+
+	httpOverride *http.Client // tests: skips the token exchange
 
 	mu      sync.Mutex
 	refresh string
-	client  *sheets.API
+	client  *http.Client
 }
 
-func (o *ownerGrid) api() (*sheets.API, error) {
+func fixedSheet(id string) func() (string, error) { return func() (string, error) { return id, nil } }
+
+func registryCurrent(reg *trips.Registry) func() (string, error) {
+	return func() (string, error) {
+		id, err := reg.Current()
+		if err != nil {
+			return "", err
+		}
+		if id == "" {
+			return "", sheets.ErrNoTrip
+		}
+		return id, nil
+	}
+}
+
+// httpClient is the owner's authorized client (it refreshes the access token itself).
+func (o *ownerGrid) httpClient() (*http.Client, error) {
 	tok, err := o.tokens.Load()
 	if err != nil {
 		return nil, err
@@ -92,15 +116,66 @@ func (o *ownerGrid) api() (*sheets.API, error) {
 	if tok == nil || tok.RefreshToken == "" {
 		return nil, sheets.ErrNotConnected
 	}
+	if o.httpOverride != nil {
+		return o.httpOverride, nil
+	}
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	if o.client == nil || o.refresh != tok.RefreshToken {
 		// the client outlives the request that created it, so it must not use that request's context
 		src := o.cfg.TokenSource(context.Background(), &oauth2.Token{RefreshToken: tok.RefreshToken})
-		o.client = &sheets.API{HTTP: oauth2.NewClient(context.Background(), oauth2.ReuseTokenSource(nil, src)), SpreadsheetID: o.spreadsheetID}
+		o.client = oauth2.NewClient(context.Background(), oauth2.ReuseTokenSource(nil, src))
 		o.refresh = tok.RefreshToken
 	}
 	return o.client, nil
+}
+
+// sheetAPI is the owner's access to one spreadsheet.
+func (o *ownerGrid) sheetAPI(id string) (*sheets.API, error) {
+	hc, err := o.httpClient()
+	if err != nil {
+		return nil, err
+	}
+	return &sheets.API{HTTP: hc, SpreadsheetID: id}, nil
+}
+
+// api is the current trip's spreadsheet. "Not connected" is reported before "no trip yet": connecting comes first.
+func (o *ownerGrid) api() (*sheets.API, error) {
+	if _, err := o.httpClient(); err != nil {
+		return nil, err
+	}
+	id, err := o.sheetID()
+	if err != nil {
+		return nil, err
+	}
+	return o.sheetAPI(id)
+}
+
+// ownerDrive lets the trips service use the owner's Drive.
+type ownerDrive struct{ og *ownerGrid }
+
+func (d ownerDrive) client() (*drive.Client, error) {
+	hc, err := d.og.httpClient()
+	if err != nil {
+		return nil, err
+	}
+	return &drive.Client{HTTP: hc}, nil
+}
+
+func (d ownerDrive) CreateTrip(ctx context.Context, title string) (drive.Trip, error) {
+	c, err := d.client()
+	if err != nil {
+		return drive.Trip{}, err
+	}
+	return c.CreateTrip(ctx, title)
+}
+
+func (d ownerDrive) ListTrips(ctx context.Context) ([]drive.Trip, error) {
+	c, err := d.client()
+	if err != nil {
+		return nil, err
+	}
+	return c.ListTrips(ctx)
 }
 
 // status reports whether the owner has connected Google (for the diagnose screen).
@@ -175,8 +250,13 @@ func New(cfg Config) (http.Handler, error) {
 		return true, "개발용 샘플 시트 (메모리, 재시작하면 초기화)"
 	}
 	var ownerCfg *oauth2.Config
+	var tripSvc *trips.Service
 	if cfg.ClientID != "" {
-		ownerCfg = auth.NewConfig(cfg.ClientID, cfg.ClientSecret, cfg.BaseURL, "/auth/owner/callback", []string{"openid", "email", scopeSheets})
+		scopes := []string{"openid", "email", scopeDrive}
+		if cfg.SpreadsheetID != "" {
+			scopes = []string{"openid", "email", scopeSheets}
+		}
+		ownerCfg = auth.NewConfig(cfg.ClientID, cfg.ClientSecret, cfg.BaseURL, "/auth/owner/callback", scopes)
 	}
 	if cfg.FixtureDir != "" { // development: the fixtures become an in-memory spreadsheet (changes are lost on restart)
 		mem, err := sheets.LoadFixtures(cfg.FixtureDir)
@@ -185,7 +265,12 @@ func New(cfg Config) (http.Handler, error) {
 		}
 		grid = mem
 	} else {
-		og := &ownerGrid{cfg: ownerCfg, tokens: tokens, spreadsheetID: cfg.SpreadsheetID}
+		og := &ownerGrid{cfg: ownerCfg, tokens: tokens, sheetID: fixedSheet(cfg.SpreadsheetID)}
+		if cfg.SpreadsheetID == "" { // the server creates the trips: one spreadsheet each, the newest is shown
+			reg := &trips.Registry{Path: filepath.Join(cfg.DataDir, "trips.json")}
+			og.sheetID = registryCurrent(reg)
+			tripSvc = &trips.Service{Drive: ownerDrive{og}, Reg: reg, Open: func(id string) (trips.Sheet, error) { return og.sheetAPI(id) }}
+		}
 		grid, conn = og, og.status
 	}
 	src := sheets.Source(grid)
@@ -220,6 +305,7 @@ func New(cfg Config) (http.Handler, error) {
 	(&api.Trip{
 		Grid: grid, Members: dir, Version: cfg.Version, CfgTTL: configTTL, Sample: cfg.FixtureDir != "", Conn: conn,
 		Expenses: &expenses.Service{Grid: grid, Log: &audit.GridLog{Grid: grid}},
+		Trips:    tripManager(tripSvc),
 	}).Register(rt)
 
 	mux := http.NewServeMux()
@@ -259,6 +345,14 @@ func New(cfg Config) (http.Handler, error) {
 		files.ServeHTTP(w, r)
 	})
 	return secureHeaders(mux), nil
+}
+
+// tripManager avoids a non-nil interface holding a nil pointer (api.Trip checks `Trips == nil`).
+func tripManager(s *trips.Service) api.TripManager {
+	if s == nil {
+		return nil
+	}
+	return s
 }
 
 // StaticFS picks the dashboard files: a directory on disk (live editing) or the embedded copy.

@@ -379,3 +379,15 @@ func TemplateRows() [][]string {
 	}
 	return rows
 }
+
+// RowsFor is TemplateRows with the given settings filled in (keys are the JSON names, e.g. "title", "start", "rate").
+// Unknown keys are ignored; settings not given keep the template default.
+func RowsFor(values map[string]string) [][]string {
+	rows := TemplateRows()
+	for i, f := range fields {
+		if v, ok := values[f.key]; ok {
+			rows[i+1][1] = v
+		}
+	}
+	return rows
+}
