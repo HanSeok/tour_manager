@@ -22,6 +22,15 @@ button { cursor: pointer; }
 
 header { display: flex; align-items: center; gap: 14px; padding: 12px 18px; border-bottom: 1px solid var(--line); background: var(--card); }
 header h1 { font-size: 18px; margin: 0; letter-spacing: -.02em; }
+header { position: relative; }
+.tripswitch { font-size: 12px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: var(--card); white-space: nowrap; }
+.tripmenu { position: absolute; left: 12px; top: 100%; z-index: 1000; display: grid; gap: 2px; min-width: 220px; max-width: calc(100vw - 24px); padding: 6px; background: var(--card); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+.tripmenu[hidden] { display: none; }
+.tripmenu button { text-align: left; padding: 8px 10px; border: 0; border-radius: 6px; background: transparent; }
+.tripmenu button:hover, .tripmenu button:focus-visible { background: var(--sun-soft); }
+.tripmenu button[aria-current] { font-weight: 800; }
+.tripmenu .newtrip-btn { border-top: 1px solid var(--line); border-radius: 0 0 6px 6px; margin-top: 4px; color: var(--sea); }
+.tripmenu small { padding: 4px 10px 2px; color: var(--muted); font-size: 11px; }
 header h1 small { display: block; font-size: 12px; font-weight: 500; color: var(--muted); letter-spacing: 0; }
 .dday:empty { display: none; }
 .dday { white-space: nowrap; background: var(--coral); color: #fff; font-weight: 800; padding: 4px 10px; border-radius: 999px; font-size: 13px; }
@@ -239,6 +248,8 @@ body.readonly .start-place, body.readonly .start-time, body.readonly .ev-place {
 <body>
 <header>
   <h1 id="tripTitle">여행 대시보드</h1>
+  <button type="button" id="tripSwitch" class="tripswitch" data-trip-menu="1" aria-haspopup="true" aria-expanded="false" hidden>🧳 여행 바꾸기 ▾</button>
+  <div id="tripMenu" class="tripmenu" hidden></div>
   <span class="dday" id="dday"></span>
   <div class="spent"><b id="spentJpy"></b><small id="spentKrw"></small></div>
 </header>

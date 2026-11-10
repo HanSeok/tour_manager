@@ -15,6 +15,8 @@ import (
 type TripManager interface {
 	Create(ctx context.Context, ownerEmail, ownerName string, req trips.Request) (drive.Trip, error)
 	List() ([]drive.Trip, error)
+	Current() (string, error)
+	Switch(sheetID string) error
 }
 
 // CreateTrip makes a new trip (Drive folder + spreadsheet with every tab) and switches the dashboard to it.
@@ -67,4 +69,28 @@ func (t *Trip) ListTrips(context.Context, Principal, []json.RawMessage) (any, er
 		list = []drive.Trip{}
 	}
 	return map[string]any{"trips": list}, nil
+}
+
+// SwitchTrip makes another trip the one the dashboard shows. The choice is the server's, so it applies to every member:
+// owner only.
+func (t *Trip) SwitchTrip(_ context.Context, who Principal, args []json.RawMessage) (any, error) {
+	if t.Trips == nil {
+		return nil, Errf(412, "이 서버에서는 여행을 바꿀 수 없습니다")
+	}
+	id, ok, err := arg[string](args, 0)
+	if err != nil || !ok || id == "" {
+		return nil, Errf(422, "여행을 고르세요")
+	}
+	if err := t.Trips.Switch(id); err != nil {
+		if errors.Is(err, trips.ErrUnknownTrip) {
+			return nil, Errf(404, err.Error())
+		}
+		log.Printf("switchTrip: %v", err)
+		return nil, Errf(502, "여행을 바꾸지 못했습니다")
+	}
+	t.mu.Lock()
+	t.cfgOK = false // the next read must see the other trip, not the cached settings
+	t.mu.Unlock()
+	log.Printf("switchTrip: %s by %s", id, who.Email)
+	return map[string]any{"current": id}, nil
 }

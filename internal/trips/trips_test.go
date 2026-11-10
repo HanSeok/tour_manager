@@ -206,7 +206,7 @@ func TestRegistry(t *testing.T) {
 	if cur, _ := reg.Current(); cur != "b" {
 		t.Errorf("current = %q", cur)
 	}
-	if err := reg.SetCurrent("zzz"); err == nil {
+	if err := reg.SetCurrent("zzz"); !errors.Is(err, ErrUnknownTrip) {
 		t.Error("unknown trip accepted")
 	}
 	// survives a new process
@@ -308,5 +308,31 @@ func TestPresetsReturnsACopy(t *testing.T) {
 	Presets()[0].Name = "바뀜"
 	if Presets()[0].Name == "바뀜" {
 		t.Error("callers can change the list")
+	}
+}
+
+func TestServiceSwitchChangesTheCurrentTripAndRefusesStrangers(t *testing.T) {
+	e := setup(t)
+	if _, err := e.svc.Create(context.Background(), "o@x.com", "나", valid()); err != nil {
+		t.Fatal(err)
+	}
+	other := drive.Trip{Title: "다른 여행", SheetID: "other", FolderID: "f2"}
+	if err := e.reg.Add(other); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := e.svc.Current(); cur != "other" {
+		t.Fatalf("current = %q", cur)
+	}
+	if err := e.svc.Switch("sheet1"); err != nil {
+		t.Fatal(err)
+	}
+	if cur, _ := e.svc.Current(); cur != "sheet1" {
+		t.Errorf("after Switch current = %q", cur)
+	}
+	if err := e.svc.Switch("not-ours"); !errors.Is(err, ErrUnknownTrip) {
+		t.Errorf("a sheet this server did not create must be refused: %v", err)
+	}
+	if cur, _ := e.svc.Current(); cur != "sheet1" {
+		t.Errorf("a refused switch changed the current trip to %q", cur)
 	}
 }

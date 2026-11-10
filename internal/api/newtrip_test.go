@@ -22,6 +22,9 @@ type fakeTrips struct {
 	err  error
 	got  trips.Request
 	list []drive.Trip
+
+	current  string
+	onSwitch func(id string)
 }
 
 func (f *fakeTrips) Create(_ context.Context, email, _ string, req trips.Request) (drive.Trip, error) {
@@ -39,6 +42,24 @@ func (f *fakeTrips) Create(_ context.Context, email, _ string, req trips.Request
 }
 
 func (f *fakeTrips) List() ([]drive.Trip, error) { return f.list, nil }
+
+func (f *fakeTrips) Current() (string, error) { return f.current, nil }
+
+func (f *fakeTrips) Switch(id string) error {
+	if f.err != nil {
+		return f.err
+	}
+	for _, t := range f.list {
+		if t.SheetID == id {
+			f.current = id
+			if f.onSwitch != nil {
+				f.onSwitch(id)
+			}
+			return nil
+		}
+	}
+	return trips.ErrUnknownTrip
+}
 
 // noTripGrid answers every read the way the server does before the first trip exists.
 type noTripGrid struct{ *sheets.MemGrid }
@@ -161,5 +182,105 @@ func TestListTripsReturnsWhatTheRegistryKnows(t *testing.T) {
 	list, _ := out["data"].(map[string]any)["trips"].([]any)
 	if code != 200 || len(list) != 2 {
 		t.Errorf("%d %v", code, out)
+	}
+}
+
+// swGrid is the spreadsheet of whichever trip is current: switching trips swaps what it reads.
+type swGrid struct{ *sheets.MemGrid }
+
+func tripGrid(title string) *sheets.MemGrid {
+	g := sheets.NewMemGrid(nil)
+	rows := tripconfig.RowsFor(map[string]string{"title": title, "start": "2027-05-01", "end": "2027-05-03", "timezone": "Asia/Tokyo",
+		"destKeywords": "x", "myMapsUrl": "https://www.google.com/maps/d/edit?mid=S", "localCurrency": "엔", "localSymbol": "¥", "rate": "9"})
+	_, _ = g.EnsureTab(context.Background(), tripconfig.SheetName, rows[0])
+	for _, r := range rows[1:] {
+		_ = g.Append(context.Background(), tripconfig.SheetName, []any{r[0], r[1], r[2]})
+	}
+	return g
+}
+
+func switchSetup() (*swGrid, *fakeTrips) {
+	a, b := tripGrid("오사카"), tripGrid("제주")
+	sw := &swGrid{a}
+	tm := &fakeTrips{list: []drive.Trip{{Title: "오사카", SheetID: "a"}, {Title: "제주", SheetID: "b"}}, current: "a"}
+	tm.onSwitch = func(id string) {
+		if id == "b" {
+			sw.MemGrid = b
+		} else {
+			sw.MemGrid = a
+		}
+	}
+	return sw, tm
+}
+
+func TestSwitchTripShowsTheOtherTripAtOnce(t *testing.T) {
+	sw, tm := switchSetup()
+	rt := tripRouter(members.Owner, sw, tm)
+	_, out := call(rt, "bootstrap", `{"args":[]}`, nil) // caches the settings of the first trip
+	if out["data"].(map[string]any)["config"].(map[string]any)["title"] != "오사카" {
+		t.Fatal("precondition")
+	}
+	code, out := call(rt, "switchTrip", `{"args":["b"]}`, nil)
+	if code != 200 || tm.current != "b" {
+		t.Fatalf("switchTrip: %d %v current=%s", code, out, tm.current)
+	}
+	_, out = call(rt, "bootstrap", `{"args":[]}`, nil)
+	data := out["data"].(map[string]any)
+	if data["config"].(map[string]any)["title"] != "제주" {
+		t.Errorf("must show the new trip right away, not after the settings cache expires: %v", data["config"])
+	}
+	if data["currentTrip"] != "b" {
+		t.Errorf("currentTrip = %v", data["currentTrip"])
+	}
+}
+
+func TestSwitchTripIsOwnerOnlyAndNeverReachesTheService(t *testing.T) {
+	for _, role := range []members.Role{members.Editor, members.Viewer} {
+		sw, tm := switchSetup()
+		if code, _ := call(tripRouter(role, sw, tm), "switchTrip", `{"args":["b"]}`, nil); code != 403 {
+			t.Errorf("%s: %d", role, code)
+		}
+		if tm.current != "a" {
+			t.Errorf("%s switched the trip", role)
+		}
+	}
+}
+
+func TestSwitchTripUnknownOrMissingIdIsRefused(t *testing.T) {
+	sw, tm := switchSetup()
+	rt := tripRouter(members.Owner, sw, tm)
+	if code, _ := call(rt, "switchTrip", `{"args":["nope"]}`, nil); code != 404 {
+		t.Errorf("unknown trip: %d", code)
+	}
+	for _, body := range []string{`{"args":[]}`, `{"args":[""]}`, `{"args":[5]}`} {
+		if code, _ := call(rt, "switchTrip", body, nil); code != 422 {
+			t.Errorf("%s: %d", body, code)
+		}
+	}
+	if tm.current != "a" {
+		t.Errorf("current changed to %s", tm.current)
+	}
+	if code, _ := call(tripRouter(members.Owner, sw, nil), "switchTrip", `{"args":["b"]}`, nil); code != 412 {
+		t.Errorf("no trip manager: %d", code)
+	}
+}
+
+func TestBootstrapListsTripsForTheOwnerOnly(t *testing.T) {
+	sw, tm := switchSetup()
+	_, out := call(tripRouter(members.Owner, sw, tm), "bootstrap", `{"args":[]}`, nil)
+	data := out["data"].(map[string]any)
+	if l, _ := data["trips"].([]any); len(l) != 2 || data["currentTrip"] != "a" {
+		t.Errorf("owner: trips=%v current=%v", data["trips"], data["currentTrip"])
+	}
+	if data["tripDefaults"] == nil || data["tripPresets"] == nil {
+		t.Errorf("the owner can start another trip from the dashboard, so the form data comes along")
+	}
+	_, out = call(tripRouter(members.Editor, sw, tm), "bootstrap", `{"args":[]}`, nil)
+	data = out["data"].(map[string]any)
+	if data["trips"] != nil || data["tripPresets"] != nil {
+		t.Errorf("an editor must not get the list of trips: %v", data["trips"])
+	}
+	if data["currentTrip"] != "a" {
+		t.Errorf("every browser needs to know which trip it is looking at: %v", data["currentTrip"])
 	}
 }

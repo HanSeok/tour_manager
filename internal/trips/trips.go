@@ -56,6 +56,9 @@ type Sheet interface {
 	PutRows(ctx context.Context, tab string, n int, rows [][]any) error
 }
 
+// ErrUnknownTrip means the sheet id is not one of the trips this server created.
+var ErrUnknownTrip = errors.New("알 수 없는 여행입니다")
+
 type Service struct {
 	Drive Drive
 	Open  func(sheetID string) (Sheet, error) // the owner's access to that spreadsheet
@@ -92,6 +95,12 @@ func (r Request) values() map[string]string {
 	set("payers", r.Payers)
 	return v
 }
+
+// Current is the sheet id of the trip the dashboard shows.
+func (s *Service) Current() (string, error) { return s.Reg.Current() }
+
+// Switch makes another known trip the one everybody sees.
+func (s *Service) Switch(sheetID string) error { return s.Reg.SetCurrent(sheetID) }
 
 // Create validates the request, then makes the folder, the spreadsheet and its tabs, and registers the trip as current.
 // Invalid input fails before anything is created in Google.
@@ -264,5 +273,5 @@ func (r *Registry) SetCurrent(sheetID string) error {
 			return r.save(st)
 		}
 	}
-	return errors.New("알 수 없는 여행입니다")
+	return ErrUnknownTrip
 }

@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"tourmanager/internal/drive"
 	"tourmanager/internal/expenses"
 	"tourmanager/internal/members"
 	"tourmanager/internal/places"
@@ -43,6 +44,7 @@ func (t *Trip) Register(rt *Router) {
 	rt.Register("setupSettings", PermManage, t.SetupSettings)
 	rt.Register("createTrip", PermManage, t.CreateTrip)
 	rt.Register("listTrips", PermManage, t.ListTrips)
+	rt.Register("switchTrip", PermManage, t.SwitchTrip)
 	rt.Register("addExpense", PermWrite, t.AddExpense)
 	rt.Register("updateExpense", PermWrite, t.UpdateExpense)
 	rt.Register("deleteExpense", PermWrite, t.DeleteExpense)
@@ -127,6 +129,7 @@ func (t *Trip) Bootstrap(ctx context.Context, who Principal, _ []json.RawMessage
 	out := base(cfg)
 	out["events"], out["expenses"], out["state"], out["places"] = []any{}, list, map[string]any{}, nil
 	out["sample"], out["visits"], out["photos"] = t.Sample, []any{}, []any{}
+	t.addTripChoice(who, out)
 	if cfg.Configured() {
 		if out["tripPlaces"], err = t.placeList(ctx); err != nil {
 			return nil, sheetErr("bootstrap", err)
@@ -136,6 +139,34 @@ func (t *Trip) Bootstrap(ctx context.Context, who Principal, _ []json.RawMessage
 		out["checks"] = t.checks(ctx)
 	}
 	return out, nil
+}
+
+// addTripChoice tells every browser which trip it is looking at (its own unsent data belongs to that trip), and gives the
+// owner the list to switch between and what the new-trip form needs.
+func (t *Trip) addTripChoice(who Principal, out map[string]any) {
+	if t.Trips == nil {
+		return
+	}
+	cur, err := t.Trips.Current()
+	if err != nil {
+		log.Printf("bootstrap: current trip: %v", err)
+		return
+	}
+	out["currentTrip"] = cur
+	if !who.Role.CanManage() {
+		return
+	}
+	list, err := t.Trips.List()
+	if err != nil {
+		log.Printf("bootstrap: trips: %v", err)
+		return
+	}
+	if list == nil {
+		list = []drive.Trip{}
+	}
+	out["trips"] = list
+	out["tripPresets"] = trips.Presets()
+	out["tripDefaults"] = trips.Defaults()
 }
 
 func (t *Trip) Refresh(ctx context.Context, _ Principal, _ []json.RawMessage) (any, error) {

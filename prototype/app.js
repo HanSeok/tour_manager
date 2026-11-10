@@ -56,6 +56,7 @@ const layerColor = (l) => getComputedStyle(document.documentElement).getProperty
 const store = {
   get(k, d) { try { return JSON.parse(localStorage.getItem(`trip.${k}`)) ?? d; } catch { return d; } },
   set(k, v) { try { localStorage.setItem(`trip.${k}`, JSON.stringify(v)); } catch { /* private mode: in-memory only */ } },
+  del(k) { try { localStorage.removeItem(`trip.${k}`); } catch { /* private mode */ } },
 };
 
 // "Today" on the trip's clock (a companion at home in another zone still sees the trip's date).
@@ -675,6 +676,10 @@ function render() {
 }
 
 function handleButton(ds) {
+  if (ds.tripMenu) return toggleTripMenu();
+  if (ds.switchTrip) return runSwitchTrip(ds.switchTrip);
+  if (ds.newTripScreen) return showNewTripScreen();
+  if (ds.backToTrip) return location.reload();
   if (ds.setupSettings) return runSetupSettings();
   if (ds.createTrip) return runCreateTrip();
   if (ds.delPlace) return runDeletePlace(ds.delPlace);
@@ -871,6 +876,58 @@ function runCreateTrip() {
     .catch((e) => { btn.disabled = false; btn.textContent = '여행 만들기'; showError(`여행을 만들지 못했습니다: ${e.message}`); });
 }
 
+/* ---------- several trips (owner switches, everybody follows) ---------- */
+// The data a browser keeps for the trip it last showed. Switching trips parks it under that trip and brings the other
+// trip's own back, so routes made for one trip never show up (or get sent) on another.
+const TRIP_LOCAL = ['routes', 'starts', 'startFrom', 'eventPlace', 'calendarAdds', 'draft', 'outbox', 'visits', 'synced', 'dirty'];
+/** True when this browser last showed a different trip: its data was swapped and the page must reload to pick it up. */
+function adoptTrip(id) {
+  if (!id) return false;
+  const known = store.get('tripId', null);
+  if (known === id) return false;
+  store.set('tripId', id);
+  if (!known) return false; // first visit since trips exist: what is stored belongs to this trip
+  store.set(`stash.${known}`, Object.fromEntries(TRIP_LOCAL.map((k) => [k, store.get(k, null)])));
+  const back = store.get(`stash.${id}`, {});
+  TRIP_LOCAL.forEach((k) => (back[k] == null ? store.del(k) : store.set(k, back[k])));
+  return true;
+}
+
+let TRIPS = []; let CURRENT_TRIP = ''; let NEW_TRIP_DEFAULTS = {};
+function setupTripSwitcher(res) {
+  CURRENT_TRIP = res.currentTrip || '';
+  TRIPS = Array.isArray(res.trips) ? res.trips : [];
+  NEW_TRIP_PRESETS = res.tripPresets || [];
+  NEW_TRIP_DEFAULTS = res.tripDefaults || {};
+  $('#tripSwitch').hidden = !(IS_API && ME && ME.role === 'owner' && Array.isArray(res.trips));
+}
+function toggleTripMenu(force) {
+  const menu = $('#tripMenu');
+  const open = force ?? menu.hidden;
+  menu.hidden = !open;
+  $('#tripSwitch').setAttribute('aria-expanded', String(open));
+  if (!open) return;
+  menu.innerHTML = `${TRIPS.map((t) => `<button type="button" data-switch-trip="${esc(t.sheetId)}"${t.sheetId === CURRENT_TRIP ? ' aria-current="true"' : ''}>${t.sheetId === CURRENT_TRIP ? '✓ ' : ''}${esc(t.title)}</button>`).join('')}
+    <button type="button" class="newtrip-btn" data-new-trip-screen="1">＋ 새 여행 만들기</button>
+    <small>바꾸면 동행 모두에게 그 여행이 보입니다</small>`;
+}
+function runSwitchTrip(id) {
+  if (id === CURRENT_TRIP) return toggleTripMenu(false);
+  const btn = document.querySelector(`#tripMenu [data-switch-trip="${CSS.escape(id)}"]`);
+  if (btn) { btn.disabled = true; btn.textContent = '바꾸는 중…'; }
+  callServer('switchTrip', id)
+    .then(() => location.reload())
+    .catch((e) => { toggleTripMenu(false); showError(`여행을 바꾸지 못했습니다: ${e.message}`); });
+}
+function showNewTripScreen() {
+  toggleTripMenu(false);
+  showBanner('새 여행을 만들어 주세요');
+  $('.layout').innerHTML = `<section class="setup"><p><button type="button" data-back-to-trip="1">← 돌아가기</button></p>${newTripForm(NEW_TRIP_DEFAULTS)}</section>`;
+}
+document.addEventListener('click', (e) => {
+  if (!e.target.closest('#tripMenu, #tripSwitch')) toggleTripMenu(false);
+});
+
 function showSetup(cfg, checks, connect, newTrip, tripDefaults, tripPresets) {
   NEW_TRIP_PRESETS = tripPresets || [];
   if (newTrip && IS_API && ME && ME.role === 'owner') {
@@ -941,7 +998,7 @@ function refreshExpenses() {
 const reloadExpenses = () => refreshExpenses();
 
 function refreshShared() {
-  if (!IS_SERVER || state.isStale || document.hidden) return;
+  if (!IS_SERVER || state.isStale || document.hidden || document.querySelector('.setup')) return; // not while the new-trip form replaces the dashboard
   if (IS_API) { refreshExpenses(); return; }
   callServer('refresh').then((res) => {
     const remote = res.state || {};
@@ -962,6 +1019,7 @@ const BOOT_RETRY_MS = 3000;
 function boot(retriesLeft) {
   callServer('bootstrap')
     .then((res) => {
+      if (IS_API && adoptTrip(res.currentTrip)) return location.reload();
       const cfg = res.config;
       if (cfg.missing.length || cfg.invalid.length) {
         if (IS_API) ME = res.me; // the setup screen offers owner-only actions
@@ -973,6 +1031,7 @@ function boot(retriesLeft) {
         ME = res.me;
         CAN_EDIT = ME.role !== 'viewer';
         if (CAN_EDIT) addLinkControl();
+        setupTripSwitcher(res);
         MEMBERS = Object.fromEntries((res.members || []).map((x) => [String(x.email).toLowerCase(), x]));
         // the dev server (fixtures) has no calendar / My Maps yet: show the sample day so the whole screen can be tried
         BASE_PLACES = res.sample ? SAMPLE_PLACES : [];
