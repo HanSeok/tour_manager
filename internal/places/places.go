@@ -20,6 +20,7 @@ import (
 	"unicode/utf8"
 
 	"tourmanager/internal/audit"
+	"tourmanager/internal/maplink"
 	"tourmanager/internal/sheets"
 )
 
@@ -32,7 +33,7 @@ const (
 )
 
 // Header is the first row of the 장소 tab. Reads are positional.
-var Header = []string{"ID", "이름", "분류", "위도", "경도", "메모", "기록자", "수정자", "수정시각"}
+var Header = []string{"ID", "이름", "분류", "위도", "경도", "메모", "기록자", "수정자", "수정시각", "링크"}
 
 const (
 	colID = iota
@@ -44,6 +45,7 @@ const (
 	colCreatedBy
 	colUpdatedBy
 	colUpdatedAt
+	colLink
 )
 
 // Layers are the categories the dashboard offers (colour and filter).
@@ -65,6 +67,7 @@ type Place struct {
 	CreatedBy string  `json:"createdBy"`
 	UpdatedBy string  `json:"updatedBy"`
 	UpdatedAt string  `json:"updatedAt"` // pass back as baseUpdatedAt when editing or deleting
+	Link      string  `json:"link"`      // where the place came from (a Google / Kakao map link), "" if it was tapped on the map
 }
 
 // Input is what the dashboard submits. Coordinates arrive as JSON numbers or numeric strings.
@@ -75,6 +78,7 @@ type Input struct {
 	Lat   any    `json:"lat"`
 	Lng   any    `json:"lng"`
 	Memo  string `json:"memo"`
+	Link  string `json:"link"`
 }
 
 // ValidationError is a user-facing input problem (HTTP 422).
@@ -124,13 +128,14 @@ func hasControl(s string) bool {
 }
 
 type cleaned struct {
-	Name, Layer, Memo string
-	Lat, Lng          float64
+	Name, Layer, Memo, Link string
+	Lat, Lng                float64
 }
 
 func clean(in Input) (cleaned, error) {
 	name := strings.TrimSpace(in.Name)
 	memo := strings.TrimSpace(in.Memo)
+	link := strings.TrimSpace(in.Link)
 	switch {
 	case name == "":
 		return cleaned{}, invalid("장소 이름을 입력하세요")
@@ -140,6 +145,8 @@ func clean(in Input) (cleaned, error) {
 		return cleaned{}, invalid("장소 이름에 줄바꿈이나 제어 문자를 쓸 수 없습니다")
 	case utf8.RuneCountInString(memo) > maxMemoLen:
 		return cleaned{}, invalid("메모는 %d자까지 입니다", maxMemoLen)
+	case link != "" && !maplink.AllowedLink(link):
+		return cleaned{}, invalid("링크는 구글 지도·카카오맵 주소(https)만 저장할 수 있습니다")
 	}
 	ok := false
 	for _, l := range Layers {
@@ -158,7 +165,7 @@ func clean(in Input) (cleaned, error) {
 	case lat == 0 && lng == 0:
 		return cleaned{}, invalid("위치를 지도에서 골라 주세요") // 0,0 is what a missing value looks like
 	}
-	return cleaned{Name: name, Layer: in.Layer, Memo: memo, Lat: lat, Lng: lng}, nil
+	return cleaned{Name: name, Layer: in.Layer, Memo: memo, Link: link, Lat: lat, Lng: lng}, nil
 }
 
 func cell(row []string, i int) string {
@@ -179,11 +186,11 @@ func fromRow(row []string) (Place, bool) {
 		name = row[colName] // not trimmed away: what was stored is what comes back
 	}
 	return Place{ID: cell(row, colID), Name: name, Layer: cell(row, colLayer), Lat: lat, Lng: lng, Memo: cell(row, colMemo),
-		CreatedBy: cell(row, colCreatedBy), UpdatedBy: cell(row, colUpdatedBy), UpdatedAt: cell(row, colUpdatedAt)}, true
+		CreatedBy: cell(row, colCreatedBy), UpdatedBy: cell(row, colUpdatedBy), UpdatedAt: cell(row, colUpdatedAt), Link: cell(row, colLink)}, true
 }
 
 func toRow(c cleaned, id, createdBy, updatedBy, updatedAt string) []any {
-	return []any{id, c.Name, c.Layer, c.Lat, c.Lng, c.Memo, createdBy, updatedBy, updatedAt}
+	return []any{id, c.Name, c.Layer, c.Lat, c.Lng, c.Memo, createdBy, updatedBy, updatedAt, c.Link}
 }
 
 func anyToStrings(row []any) []string {
@@ -237,6 +244,16 @@ func (s *Service) rows(ctx context.Context) ([][]string, error) {
 			return nil, err
 		}
 		return s.Grid.RawRows(ctx, Tab)
+	}
+	if err == nil && len(rows) > 0 && len(rows[0]) < len(Header) { // a tab made before a column was added: complete its header
+		head := make([]any, len(Header))
+		for i, h := range Header {
+			head[i] = h
+		}
+		if err := s.Grid.UpdateRow(ctx, Tab, 1, head); err != nil {
+			return nil, err
+		}
+		rows[0] = append([]string(nil), Header...)
 	}
 	return rows, err
 }

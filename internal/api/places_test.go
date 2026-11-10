@@ -146,3 +146,20 @@ func TestResolvePlaceLinkErrors(t *testing.T) {
 		t.Errorf("not available: %d", code)
 	}
 }
+
+func TestPlaceLinkRoundTripsThroughTheServer(t *testing.T) {
+	rt := placesRouter(members.Editor, configuredGrid())
+	body := `{"args":[{"id":"` + pid + `","name":"공항","layer":"교통","lat":34.78,"lng":135.43,"memo":"","link":"https://maps.app.goo.gl/waTe1ppztvxpCJWXA"}]}`
+	if code, out := call(rt, "addPlace", body, nil); code != 200 {
+		t.Fatalf("%d %v", code, out)
+	}
+	_, out := call(rt, "refresh", `{"args":[]}`, nil)
+	tp, _ := out["data"].(map[string]any)["tripPlaces"].([]any)
+	if len(tp) != 1 || tp[0].(map[string]any)["link"] != "https://maps.app.goo.gl/waTe1ppztvxpCJWXA" {
+		t.Errorf("tripPlaces = %v", tp)
+	}
+	bad := strings.Replace(body, "https://maps.app.goo.gl/waTe1ppztvxpCJWXA", "javascript:alert(1)", 1)
+	if code, out := call(rt, "addPlace", strings.Replace(bad, pid, "55555555-5555-4555-8555-555555555555", 1), nil); code != 422 {
+		t.Errorf("an unsafe link must be refused: %d %v", code, out)
+	}
+}

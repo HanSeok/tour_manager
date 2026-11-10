@@ -222,3 +222,72 @@ func TestThereIsALimitOnHowManyPlacesATripHolds(t *testing.T) {
 		t.Errorf("want ValidationError at the limit, got %v", err)
 	}
 }
+
+func TestTheSourceLinkIsStoredAndReturned(t *testing.T) {
+	s, g, _ := newSvc()
+	in := okInput()
+	in.Link = "https://maps.app.goo.gl/waTe1ppztvxpCJWXA"
+	list, err := s.Add(context.Background(), "a@x.com", in)
+	if err != nil || list[0].Link != in.Link {
+		t.Fatalf("%v %+v", err, list)
+	}
+	rows, _ := g.Rows(context.Background(), Tab)
+	if len(Header) != 10 || Header[9] != "링크" || len(rows[1]) != 10 || rows[1][9] != in.Link {
+		t.Errorf("header=%v row=%v", Header, rows[1])
+	}
+	in.Link = "https://place.map.kakao.com/1650036035"
+	list, err = s.Update(context.Background(), "b@x.com", id1, in, nil)
+	if err != nil || list[0].Link != in.Link {
+		t.Errorf("update: %v %+v", err, list)
+	}
+}
+
+func TestOnlyGoogleAndKakaoLinksAreAccepted(t *testing.T) {
+	for _, link := range []string{
+		"javascript:alert(1)", "http://maps.app.goo.gl/x", "https://evil.example/x", "https://maps.app.goo.gl.evil.example/x",
+		"https://maps.app.goo.gl:8443/x", "//maps.app.goo.gl/x", "data:text/html,x", "https://maps.app.goo.gl/" + strings.Repeat("a", 500),
+		"https://maps.app.goo.gl/x y", "https://user:pw@maps.app.goo.gl/x",
+	} {
+		s, g, _ := newSvc()
+		in := okInput()
+		in.Link = link
+		var ve *ValidationError
+		if _, err := s.Add(context.Background(), "a@x.com", in); !errors.As(err, &ve) {
+			t.Errorf("%q: want ValidationError, got %v", link, err)
+		}
+		if rows, _ := g.Rows(context.Background(), Tab); len(rows) > 1 {
+			t.Errorf("%q stored", link)
+		}
+	}
+	s, _, _ := newSvc()
+	in := okInput()
+	for _, ok := range []string{"", "https://maps.app.goo.gl/waTe1ppztvxpCJWXA", "https://www.google.com/maps/place/x/@1,2,3z", "https://place.map.kakao.com/1650036035", "https://kko.to/abc"} {
+		in.Link = ok
+		in.ID = "" // a new place each time
+		if _, err := s.Add(context.Background(), "a@x.com", in); err != nil {
+			t.Errorf("%q rejected: %v", ok, err)
+		}
+	}
+}
+
+func TestPlacesStoredBeforeTheLinkColumnStillReadAndTheHeaderIsCompleted(t *testing.T) {
+	old := [][]string{
+		{"ID", "이름", "분류", "위도", "경도", "메모", "기록자", "수정자", "수정시각"},
+		{id1, "옛 장소", "관광", "26.2", "127.7", "", "a@x.com", "a@x.com", "2027-04-10T00:00:00.000Z"},
+	}
+	g := sheets.NewMemGrid(map[string][][]string{Tab: old})
+	s := &Service{Grid: g}
+	list, err := s.List(context.Background())
+	if err != nil || len(list) != 1 || list[0].Name != "옛 장소" || list[0].Link != "" {
+		t.Fatalf("%v %+v", err, list)
+	}
+	rows, _ := g.Rows(context.Background(), Tab)
+	if len(rows[0]) != len(Header) || rows[0][9] != "링크" {
+		t.Errorf("the header was not completed: %v", rows[0])
+	}
+	in := okInput()
+	in.Link = "https://kko.to/abc"
+	if list, err = s.Update(context.Background(), "b@x.com", id1, in, nil); err != nil || list[0].Link != in.Link {
+		t.Errorf("%v %+v", err, list)
+	}
+}

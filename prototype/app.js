@@ -147,9 +147,14 @@ function placeFromMyMaps(m) {
 
 /* Go server: places the members add themselves (tap the map). They live in the sheet's 장소 tab. */
 let BASE_PLACES = []; // dev sample places (never saved); the trip's own places are added on top
+// A stored link is only ever shown as a clickable link when it is https (the server also refuses anything else).
+const safeLink = (u) => (typeof u === 'string' && /^https:\/\/[^\s]+$/.test(u) ? u : '');
+const linkLabel = (u) => (/kakao|kko\.to/.test(u) ? '카카오맵에서 보기' : '구글 지도에서 보기');
+const linkIcon = (p) => (p && safeLink(p.link)
+  ? ` <a class="plink" href="${esc(safeLink(p.link))}" target="_blank" rel="noopener noreferrer" title="${linkLabel(p.link)} (사진·후기)">🔗</a>` : '');
 const placeFromTrip = (p) => ({
   id: p.id, name: p.name, layer: p.layer, category: '직접 추가', lat: p.lat, lng: p.lng, hours: null, rating: null, reviews: null, price: '',
-  memo: p.memo || '', url: `${GMAPS}/search/?api=1&query=${p.lat},${p.lng}`, own: true,
+  memo: p.memo || '', link: safeLink(p.link), url: safeLink(p.link) || `${GMAPS}/search/?api=1&query=${p.lat},${p.lng}`, own: true,
   createdBy: p.createdBy, updatedBy: p.updatedBy, updatedAt: p.updatedAt,
 });
 const tripPlacesOf = (list) => [...BASE_PLACES, ...(list || []).map(placeFromTrip)];
@@ -297,7 +302,7 @@ function renderMap(plan) {
     const action = (!isEditable() ? '' : userIds.has(p.id) ? `<button data-del-id="${esc(p.id)}">동선에서 빼기</button>`
       : isOnRoute ? '' : `<button data-add="${esc(p.id)}">동선에 추가</button>`) + delPlace;
     L.marker([p.lat, p.lng], { icon: pinIcon(layerColor(p.layer), label[p.id] ?? initial(p)), opacity: visible ? 1 : 0.25, zIndexOffset: isOnRoute ? 1000 : 0 })
-      .bindPopup(`<div class="pop"><b>${esc(p.name)}</b><p>${esc(p.category)}${p.rating ? ` · ★${p.rating} (${p.reviews ?? 0})` : ''}${p.price ? ` · ${esc(p.price)}` : ''}<br>${md(plan.date)}(${WD[plan.wd]}) ${esc(hoursText(p, plan.wd))}</p>${own}${action}<a href="${esc(p.url)}" target="_blank" rel="noopener">Google 지도 ↗</a></div>`)
+      .bindPopup(`<div class="pop"><b>${esc(p.name)}</b><p>${esc(p.category)}${p.rating ? ` · ★${p.rating} (${p.reviews ?? 0})` : ''}${p.price ? ` · ${esc(p.price)}` : ''}<br>${md(plan.date)}(${WD[plan.wd]}) ${esc(hoursText(p, plan.wd))}</p>${own}${action}<a href="${esc(p.url)}" target="_blank" rel="noopener noreferrer">${p.link ? `${linkLabel(p.link)} ↗` : 'Google 지도 ↗'}</a></div>`)
       .addTo(pins);
   });
   const pts = [plan.start, ...plan.stops].filter(isLocated).map((p) => [p.lat, p.lng]);
@@ -316,12 +321,14 @@ map.on('popupopen', (e) => {
 });
 
 // The new-place form (Go server): opened by tapping the map, or by a pasted Google Maps link (name and position filled in).
-function openNewPlaceForm(ll, name = '', layer = '', memo = '') {
+function openNewPlaceForm(ll, name = '', layer = '', memo = '', link = '') {
   L.popup({ minWidth: 230 }).setLatLng(ll).setContent(`<form class="pop newplace"><b>새 장소</b>
     <small>${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}</small>
     <input name="name" placeholder="장소 이름" maxlength="60" required value="${esc(name)}">
     <select name="layer" aria-label="분류">${LAYERS.map((l) => `<option${l === layer ? ' selected' : ''}>${l}</option>`).join('')}</select>
     <input name="memo" placeholder="메모 (선택)" maxlength="200" value="${esc(memo.slice(0, 200))}">
+    <input type="hidden" name="link" value="${esc(safeLink(link))}">
+    ${safeLink(link) ? '<small>🔗 원본 링크가 함께 저장됩니다</small>' : ''}
     <button type="submit" class="submit">추가</button></form>`).openOn(map);
 }
 
@@ -341,7 +348,7 @@ function findFromLink(form) {
       form.link.value = ''; form.hidden = true;
       const ll = L.latLng(r.lat, r.lng);
       map.setView(ll, Math.max(map.getZoom(), 16));
-      openNewPlaceForm(ll, r.name, r.layer, r.address || '');
+      openNewPlaceForm(ll, r.name, r.layer, r.address || '', r.link || '');
     })
     .catch((e) => showError(`링크를 읽지 못했습니다: ${e.message}`))
     .finally(() => { btn.disabled = false; btn.textContent = '찾기'; });
@@ -369,7 +376,7 @@ function addLinkControl() {
 function submitNewPlace(form, ll) {
   const btn = form.querySelector('button');
   btn.disabled = true;
-  const place = { id: newId(), name: form.name.value, layer: form.layer.value, lat: Number(ll.lat.toFixed(6)), lng: Number(ll.lng.toFixed(6)), memo: form.memo.value };
+  const place = { id: newId(), name: form.name.value, layer: form.layer.value, lat: Number(ll.lat.toFixed(6)), lng: Number(ll.lng.toFixed(6)), memo: form.memo.value, link: form.link.value };
   callWrite('addPlace', place)
     .then((list) => { map.closePopup(); applyTripPlaces(list); render(); })
     .catch((e) => { btn.disabled = false; showError(`장소를 추가하지 못했습니다: ${e.message}`); });
@@ -397,7 +404,7 @@ function stopCard(l, s, i, num, wd) {
     l.wait > 0 && `<span class="badge WAIT">개점까지 ${dur(l.wait)} 대기</span>`,
   ].filter(Boolean).join('');
   return `<li class="node"><span class="num">${num}</span><div class="card ${l.warn ? `warn-${l.warn}` : ''}">
-    <div class="row"><span><b>${esc(s.name)}</b>${s.status === 'visited' ? ' <span class="badge OK">✅ 방문함</span>' : ''}</span><span class="ctrl">${moveCtrl(i)}<button data-del="${i}" aria-label="삭제">✕</button></span></div>
+    <div class="row"><span><b>${esc(s.name)}</b>${linkIcon(s)}${s.status === 'visited' ? ' <span class="badge OK">✅ 방문함</span>' : ''}</span><span class="ctrl">${moveCtrl(i)}<button data-del="${i}" aria-label="삭제">✕</button></span></div>
     <div class="times"><div><small>도착</small><b>${fmtClock(l.arrive)}</b></div>
       <div class="avail"><small>머물 수 있는 시간</small><b>${l.availMin == null ? '제한 없음' : dur(l.availMin)}</b></div>
       <div><small>출발</small><b>${fmtClock(l.depart)}</b></div></div>
@@ -434,7 +441,7 @@ function candRow(s, id, l) {
     live && `<button class="mini" data-closed="${sid}" data-place="${pid}">🚫 닫혀 있음</button>`,
     `<button class="mini" data-cand-del="${sid}" data-place="${pid}" aria-label="후보에서 빼기">✕</button>`,
   ].filter(Boolean).join('');
-  return `<li class="cand ${out ? 'out' : ''} ${chosen ? 'chosen' : ''}"><div><b>${esc(p ? p.name : id)}</b> ${tag}${!out && c ? `<small>${candNote(c)}</small>` : ''}</div><span class="acts edit-only">${acts}</span></li>`;
+  return `<li class="cand ${out ? 'out' : ''} ${chosen ? 'chosen' : ''}"><div><b>${esc(p ? p.name : id)}</b>${linkIcon(p)} ${tag}${!out && c ? `<small>${candNote(c)}</small>` : ''}</div><span class="acts edit-only">${acts}</span></li>`;
 }
 
 function slotCard(l, s, i, num, wd) {

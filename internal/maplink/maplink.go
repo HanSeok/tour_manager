@@ -28,6 +28,41 @@ type Result struct {
 	Lng     float64 `json:"lng"`
 	Layer   string  `json:"layer,omitempty"`   // suggested category, when the source says what the place is
 	Address string  `json:"address,omitempty"` // street address, when the source gives one
+	Link    string  `json:"link,omitempty"`    // the link worth keeping to open the place again (photos, reviews …)
+}
+
+// MaxLinkLen is the longest link that is stored with a place.
+const MaxLinkLen = 500
+
+// AllowedLink reports whether a link may be stored and shown as a clickable link: https, a Google or Kakao map host,
+// no credentials, no port, no whitespace, not absurdly long. Anything else could point somewhere we never vetted.
+func AllowedLink(raw string) bool {
+	if raw == "" || len(raw) > MaxLinkLen || strings.ContainsAny(raw, " \t\r\n") {
+		return false
+	}
+	for _, r := range raw {
+		if r < 0x20 || r == 0x7f {
+			return false
+		}
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme != "https" || u.User != nil || u.Port() != "" || u.Opaque != "" {
+		return false
+	}
+	return defaultAllow(u.Hostname())
+}
+
+// withLink attaches the link to keep: Kakao places get their clean address, anything else the link as it was shared.
+func withLink(res Result, shared string) Result {
+	if u, err := url.Parse(shared); err == nil {
+		if id := kakaoPlaceID(u); id != "" {
+			shared = "https://place.map.kakao.com/" + id
+		}
+	}
+	if AllowedLink(shared) {
+		res.Link = shared
+	}
+	return res
 }
 
 // InputError means the link itself is the problem (not Google being unreachable).
@@ -185,13 +220,17 @@ func (r *Resolver) Resolve(ctx context.Context, text string) (Result, error) {
 			return Result{}, bad("구글 지도·카카오맵 링크만 읽을 수 있습니다 (maps.app.goo.gl, place.map.kakao.com …)")
 		}
 		if res, ok := Parse(cur); ok {
-			return res, nil
+			return withLink(res, raw), nil
 		}
 		if res, ok := parseKakaoLink(cur); ok {
-			return res, nil
+			return withLink(res, raw), nil
 		}
 		if id := kakaoPlaceID(cur); id != "" {
-			return kakaoPlace(ctx, &client, id)
+			res, err := kakaoPlace(ctx, &client, id)
+			if err != nil {
+				return res, err
+			}
+			return withLink(res, raw), nil
 		}
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, cur.String(), nil)
 		if err != nil {

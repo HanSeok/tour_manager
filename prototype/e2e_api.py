@@ -200,6 +200,19 @@ with sync_playwright() as p:
     A.wait_for_function("PLACES.some((p) => p.own && p.name === '오사카 공항 (이타미 공항)')")
     got = [p for p in trip_places(A) if p['name'].startswith('오사카')]
     check(len(got) == 1 and got[0]['layer'] == '교통' and abs(got[0]['lat'] - 34.786161) < 1e-5 and abs(got[0]['lng'] - 135.438048) < 1e-5, f'saved with the pin position: {got}')
+    check(got[0]['link'] == LINK, 'the link that was pasted is saved with the place')
+    pop_js = "pins.eachLayer((m) => { const pp = m.getPopup && m.getPopup(); if (pp && /오사카 공항/.test(pp.getContent())) m.openPopup(); })"
+    A.wait_for_function("!document.querySelector('.newplace')")  # the form popup is still fading out right after saving
+    A.evaluate(pop_js)
+    A.wait_for_selector('.leaflet-popup a[href^="https://www.google.com/maps/place/"]')
+    check('구글 지도에서 보기' in A.inner_text('.leaflet-popup'), 'the pin popup opens the saved link')
+    pid_osaka = A.evaluate("PLACES.find((p) => p.name.startsWith('오사카')).id")
+    A.keyboard.press('Escape')
+    A.click('[data-tab=route]')
+    A.click(f'#tab-route [data-add="{pid_osaka}"]')
+    A.wait_for_selector('#tab-route .plink')
+    check(A.get_attribute('#tab-route .plink', 'href') == LINK and A.get_attribute('#tab-route .plink', 'rel') == 'noopener noreferrer',
+          'the route card has a 🔗 that opens the saved link safely')
 
     A.wait_for_function("!document.querySelector('.newplace')")  # the popup fades out for ~200ms after saving
     A.click('.linkbtn')

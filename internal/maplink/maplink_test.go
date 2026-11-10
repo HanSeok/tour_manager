@@ -389,3 +389,42 @@ func TestKakaoCategoriesMapToTheDashboardLayers(t *testing.T) {
 		}
 	}
 }
+
+func TestAllowedLink(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"https://maps.app.goo.gl/x": true, "https://www.google.com/maps/place/x": true, "https://place.map.kakao.com/1650036035": true,
+		"https://kko.to/abc": true, "https://map.kakao.com/link/map/a,1,2": true,
+		"http://maps.app.goo.gl/x": false, "https://evil.example/x": false, "javascript:alert(1)": false, "": false,
+		"https://maps.app.goo.gl:8443/x": false, "https://u:p@maps.app.goo.gl/x": false, "https://maps.app.goo.gl/a b": false,
+	} {
+		if AllowedLink(raw) != want {
+			t.Errorf("%q: want %v", raw, want)
+		}
+	}
+}
+
+func TestResolveReturnsALinkWorthKeeping(t *testing.T) {
+	long := "https://www.google.com/maps/place/Cafe/@35.6,139.7,17z/data=!3d35.61!4d139.71"
+	n := &rt{reply: map[string]string{"https://maps.app.goo.gl/abc": long}}
+	res, err := prod(n).Resolve(context.Background(), "여기 https://maps.app.goo.gl/abc 어때")
+	if err != nil || res.Link != "https://maps.app.goo.gl/abc" {
+		t.Errorf("the short link the user shared is the one to keep: %+v %v", res, err)
+	}
+	res, _ = prod(&rt{}).Resolve(context.Background(), long)
+	if res.Link != long {
+		t.Errorf("a full link is kept as is: %q", res.Link)
+	}
+	tooLong := long + "?" + strings.Repeat("x", 600)
+	if res, err = prod(&rt{}).Resolve(context.Background(), tooLong); err != nil || res.Link != "" {
+		t.Errorf("a link too long to store is dropped, the place still resolves: %+v %v", res, err)
+	}
+	k := &rt{bodies: map[string]string{kakaoPanel: kakaoBody}}
+	res, _ = prod(k).Resolve(context.Background(), "https://place.map.kakao.com/1650036035?service=tracking&x=1")
+	if res.Link != "https://place.map.kakao.com/1650036035" {
+		t.Errorf("a Kakao place gets its clean address: %q", res.Link)
+	}
+	res, _ = prod(&rt{}).Resolve(context.Background(), "https://map.kakao.com/link/map/Cafe,37.5,127.0")
+	if res.Link != "https://map.kakao.com/link/map/Cafe,37.5,127.0" {
+		t.Errorf("link/map: %q", res.Link)
+	}
+}
