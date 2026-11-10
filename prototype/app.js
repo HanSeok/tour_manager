@@ -298,7 +298,7 @@ function renderMap(plan) {
     const isOnRoute = p.id in label;
     const visible = state.layer === '전체' || state.layer === p.layer || isOnRoute;
     const own = p.own ? `<small class="by">✍ ${esc(whoName(p.createdBy))}${p.memo ? ` · ${esc(p.memo)}` : ''}</small>` : '';
-    const delPlace = p.own && isEditable() ? `<button data-del-place="${esc(p.id)}">장소 삭제</button>` : '';
+    const delPlace = p.own && isEditable() ? `<button data-edit-place="${esc(p.id)}">장소 수정</button><button data-del-place="${esc(p.id)}">장소 삭제</button>` : '';
     const action = (!isEditable() ? '' : userIds.has(p.id) ? `<button data-del-id="${esc(p.id)}">동선에서 빼기</button>`
       : isOnRoute ? '' : `<button data-add="${esc(p.id)}">동선에 추가</button>`) + delPlace;
     L.marker([p.lat, p.lng], { icon: pinIcon(layerColor(p.layer), label[p.id] ?? initial(p)), opacity: visible ? 1 : 0.25, zIndexOffset: isOnRoute ? 1000 : 0 })
@@ -321,15 +321,15 @@ map.on('popupopen', (e) => {
 });
 
 // The new-place form (Go server): opened by tapping the map, or by a pasted Google Maps link (name and position filled in).
-function openNewPlaceForm(ll, name = '', layer = '', memo = '', link = '') {
-  L.popup({ minWidth: 230 }).setLatLng(ll).setContent(`<form class="pop newplace"><b>새 장소</b>
+function openNewPlaceForm(ll, name = '', layer = '', memo = '', link = '', editId = '') {
+  L.popup({ minWidth: 230 }).setLatLng(ll).setContent(`<form class="pop newplace"${editId ? ` data-edit-id="${esc(editId)}"` : ''}><b>${editId ? '장소 수정' : '새 장소'}</b>
     <small>${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}</small>
     <input name="name" placeholder="장소 이름" maxlength="60" required value="${esc(name)}">
     <select name="layer" aria-label="분류">${LAYERS.map((l) => `<option${l === layer ? ' selected' : ''}>${l}</option>`).join('')}</select>
     <input name="memo" placeholder="메모 (선택)" maxlength="200" value="${esc(memo.slice(0, 200))}">
     <input type="hidden" name="link" value="${esc(safeLink(link))}">
     ${safeLink(link) ? '<small>🔗 원본 링크가 함께 저장됩니다</small>' : ''}
-    <button type="submit" class="submit">추가</button></form>`).openOn(map);
+    <button type="submit" class="submit">${editId ? '저장' : '추가'}</button></form>`).openOn(map);
 }
 
 map.on('click', (e) => {
@@ -373,9 +373,28 @@ function addLinkControl() {
   linkControl = new Box({ position: 'topleft' }).addTo(map);
 }
 
+function runEditPlace(id) {
+  const p = byId[id];
+  if (!p) return;
+  openNewPlaceForm(L.latLng(p.lat, p.lng), p.name, p.layer, p.memo, p.link, id);
+}
+
 function submitNewPlace(form, ll) {
   const btn = form.querySelector('button');
   btn.disabled = true;
+  const editId = form.dataset.editId;
+  if (editId) {
+    const p = byId[editId];
+    const edited = { id: editId, name: form.name.value, layer: form.layer.value, lat: p.lat, lng: p.lng, memo: form.memo.value, link: form.link.value };
+    callWrite('updatePlace', editId, edited, p.updatedAt)
+      .then((list) => { map.closePopup(); applyTripPlaces(list); render(); })
+      .catch((e) => {
+        btn.disabled = false;
+        if (e.status === 409 || e.status === 404) refreshExpenses();
+        showError(`장소를 수정하지 못했습니다: ${e.message}`);
+      });
+    return;
+  }
   const place = { id: newId(), name: form.name.value, layer: form.layer.value, lat: Number(ll.lat.toFixed(6)), lng: Number(ll.lng.toFixed(6)), memo: form.memo.value, link: form.link.value };
   callWrite('addPlace', place)
     .then((list) => { map.closePopup(); applyTripPlaces(list); render(); })
@@ -659,6 +678,7 @@ function handleButton(ds) {
   if (ds.setupSettings) return runSetupSettings();
   if (ds.createTrip) return runCreateTrip();
   if (ds.delPlace) return runDeletePlace(ds.delPlace);
+  if (ds.editPlace) return runEditPlace(ds.editPlace);
   if (ds.tab) return setState({ tab: ds.tab, tabChosen: true });
   if (ds.date) return setState({ date: ds.date });
   if (ds.goto) return setState({ tab: 'route', date: ds.goto });

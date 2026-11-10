@@ -172,6 +172,35 @@ with sync_playwright() as p:
     C.wait_for_timeout(400)
     check(C.locator('.newplace').count() == 0, 'viewer: tapping the map does not open the form')
 
+    # the author edits name / category / memo from the pin popup; position and author stay; others see it after a refresh
+    A.evaluate("renderMap(planFor(state.date)); pins.eachLayer((m) => { const pp = m.getPopup && m.getPopup(); if (pp && /내가 찍은 카페/.test(pp.getContent())) m.openPopup(); })")
+    A.wait_for_selector('.leaflet-popup [data-edit-place]')
+    A.click('.leaflet-popup [data-edit-place]')
+    A.wait_for_selector('.newplace[data-edit-id] [name=name]')
+    check(A.input_value('.newplace [name=name]') == '내가 찍은 카페' and A.input_value('.newplace [name=memo]') == '오전에' and '장소 수정' in A.inner_text('.newplace'), 'edit form is prefilled')
+    pos0 = (saved[0]['lat'], saved[0]['lng'])
+    A.fill('.newplace [name=name]', '고친 카페')
+    A.select_option('.newplace [name=layer]', '쇼핑')
+    A.fill('.newplace [name=memo]', '오후로 변경')
+    A.click('.newplace .submit')
+    A.wait_for_function("PLACES.some((p) => p.name === '고친 카페')")
+    ed = trip_places(A)
+    check(len(ed) == 1 and ed[0]['name'] == '고친 카페' and ed[0]['layer'] == '쇼핑' and ed[0]['memo'] == '오후로 변경'
+          and (ed[0]['lat'], ed[0]['lng']) == pos0 and ed[0]['createdBy'] == 'dev-editor@example.com' and ed[0]['id'] == saved[0]['id'], f'edited in place: {ed}')
+    A.wait_for_function("!document.querySelector('.newplace')")
+    B.evaluate('refreshShared()')
+    B.wait_for_function("PLACES.some((p) => p.name === '고친 카페')")
+    check(True, 'the owner sees the edit after a refresh')
+    # the old name is gone from the pin popups; restore it for the steps below
+    A.evaluate("callServer('updatePlace', PLACES.find((p) => p.own).id, {name:'내가 찍은 카페', layer:'식당', lat:%s, lng:%s, memo:'오전에'}).then(() => refreshExpenses())" % pos0)
+    A.wait_for_function("PLACES.some((p) => p.name === '내가 찍은 카페')")
+    C.evaluate('refreshShared()')
+    C.wait_for_function("PLACES.some((p) => p.name === '내가 찍은 카페')")
+    C.evaluate("renderMap(planFor(state.date)); pins.eachLayer((m) => { const pp = m.getPopup && m.getPopup(); if (pp && /내가 찍은 카페/.test(pp.getContent())) m.openPopup(); })")
+    C.wait_for_selector('.leaflet-popup')
+    check(C.locator('.leaflet-popup [data-edit-place]').count() == 0, 'viewer: no edit button')
+    C.keyboard.press('Escape')
+
     # the author can delete it from its pin popup; the viewer's popup has no delete button
     A.evaluate("renderMap(planFor(state.date)); pins.eachLayer((m) => { const pp = m.getPopup && m.getPopup(); if (pp && /내가 찍은 카페/.test(pp.getContent())) m.openPopup(); })")
     A.wait_for_selector('.leaflet-popup [data-del-place]')
