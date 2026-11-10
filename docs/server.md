@@ -38,3 +38,22 @@ OAuth 클라이언트(웹)의 리디렉션 URI 두 개를 등록: `<BASE_URL>/au
 go test ./...
 docker build -t tour-manager . && docker run --rm -p 8080:8080 -v tm-data:/data --env-file .env tour-manager
 ```
+
+## 장소 추가 (Go 서버)
+편집자·소유자는 대시보드 지도를 눌러 가고 싶은 곳을 추가합니다(이름, 분류 5종, 메모). 장소는 시트의 `장소` 탭
+(ID | 이름 | 분류 | 위도 | 경도 | 메모 | 기록자 | 수정자 | 수정시각)에 저장되어 모든 멤버와 공유되고, 지도 핀의 팝업에
+작성자가 표시됩니다. 보기 권한은 볼 수만 있습니다. 삭제는 팝업의 **장소 삭제**(변경이력에 이전 값이 남음).
+API: `addPlace(place)`, `updatePlace(id, place, baseUpdatedAt?)`, `deletePlace(id, baseUpdatedAt?)` — 응답은 전체 장소 목록이고
+`bootstrap`/`refresh` 의 `tripPlaces` 로도 내려갑니다. 이름 검색(Places API)은 아직 없습니다.
+
+### 구글 지도·카카오맵 링크로 추가
+지도 왼쪽 위의 **🔗 링크로 추가** 에 구글 지도(앱·웹)에서 장소를 연 뒤 **공유**로 복사한 링크(`https://maps.app.goo.gl/…`) 또는 카카오맵 링크(`https://place.map.kakao.com/<번호>`, `kko.to/…`, `map.kakao.com/link/map/이름,위도,경도`)를
+붙여 넣고 **찾기**를 누르면, 서버가 링크를 따라가 **장소 이름과 위치(핀 좌표)** 를 읽어 새 장소 폼에 채워 줍니다. 분류만 고르고 추가하면 됩니다.
+공유 문구 전체를 붙여 넣어도 첫 링크를 찾아 씁니다. API 키·과금이 없고, 구글 지도 도메인만 열어 보며(리다이렉트 5회까지, https),
+페이지 내용은 읽지 않고 이동 주소만 해석합니다. 좌표가 없는 일반 장소 주소(`google.com/maps/place/이름`)는 위치를 알 수 없어 거절됩니다.
+API: `resolvePlaceLink(text)` → `{name, lat, lng}`.
+
+카카오맵: 장소 페이지(`place.map.kakao.com/<번호>`)는 이름·도로명 주소(메모에 채움)·좌표를 읽고, 카카오의 분류(음식점·카페 → 식당, 숙박 → 숙소,
+교통, 쇼핑, 관광 …)를 폼의 분류로 미리 골라 줍니다. 좌표는 카카오 장소 페이지가 내부적으로 쓰는 주소(`place-api.map.kakao.com`)에서
+읽습니다. **공식 문서화된 API 가 아니라서 카카오가 바꾸면 이 경로만 동작하지 않을 수 있습니다**(그때는 "읽지 못했습니다" 안내, 다른 기능은 영향 없음).
+`map.kakao.com/link/map/…` 형식은 링크 자체에 좌표가 있어 영향이 없습니다. 접속하는 곳은 구글·카카오 도메인(https)뿐입니다.

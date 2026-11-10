@@ -141,6 +141,82 @@ with sync_playwright() as p:
     A.click('[data-tab=plan]')
     check(A.locator('[data-diagnose]').count() == 0 and C.locator('[data-diagnose]').count() == 0, 'editor / viewer have no setup-check button')
 
+    # 11. places: tap the map, name it, the others see it; viewers cannot add; authors are shown; delete
+    def trip_places(page):
+        return page.evaluate("fetch('/api/refresh', {method:'POST', headers:{'Content-Type':'application/json'}, body:'{\"args\":[]}'}).then(r => r.json()).then(j => j.data.tripPlaces)")
+
+    A.click('[data-tab=route]')
+    before = A.locator('.pin').count()
+    box = A.locator('#map').bounding_box()
+    A.mouse.click(box['x'] + 40, box['y'] + 60)  # an empty corner of the map
+    A.wait_for_selector('.newplace [name=name]')
+    check('새 장소' in A.inner_text('.newplace') and A.locator('.newplace option').count() == 5, 'editor: tapping the map opens the new-place form with the five categories')
+    A.fill('.newplace [name=name]', '내가 찍은 카페')
+    A.select_option('.newplace [name=layer]', '식당')
+    A.fill('.newplace [name=memo]', '오전에')
+    A.click('.newplace .submit')
+    A.wait_for_function("!document.querySelector('.newplace')")
+    saved = trip_places(A)
+    check(len(saved) == 1 and saved[0]['name'] == '내가 찍은 카페' and saved[0]['layer'] == '식당' and saved[0]['createdBy'] == 'dev-editor@example.com'
+          and abs(saved[0]['lat']) <= 90 and abs(saved[0]['lng']) <= 180, f'the place is saved on the server with its author: {saved}')
+    check(A.locator('.pin').count() == before + 1, 'a new pin appears on the map')
+    check('내가 찍은 카페' in A.inner_text('#tab-route'), 'the place shows in the add-to-route list')
+    B.evaluate('refreshShared()')
+    B.wait_for_function("PLACES.some((p) => p.name === '내가 찍은 카페')")
+    check(True, 'the owner sees it after a refresh')
+
+    C.evaluate('refreshShared()')
+    C.wait_for_function("PLACES.some((p) => p.name === '내가 찍은 카페')")
+    cbox = C.locator('#map').bounding_box()
+    C.mouse.click(cbox['x'] + 80, cbox['y'] + 120)
+    C.wait_for_timeout(400)
+    check(C.locator('.newplace').count() == 0, 'viewer: tapping the map does not open the form')
+
+    # the author can delete it from its pin popup; the viewer's popup has no delete button
+    A.evaluate("renderMap(planFor(state.date)); pins.eachLayer((m) => { const pp = m.getPopup && m.getPopup(); if (pp && /내가 찍은 카페/.test(pp.getContent())) m.openPopup(); })")
+    A.wait_for_selector('.leaflet-popup [data-del-place]')
+    check('✍ 동행' in A.inner_text('.leaflet-popup') or '✍ dev-editor' in A.inner_text('.leaflet-popup'), f'the popup shows who added it: {A.inner_text(".leaflet-popup")!r}')
+    C.evaluate("pins.eachLayer((m) => { const pp = m.getPopup && m.getPopup(); if (pp && /내가 찍은 카페/.test(pp.getContent())) m.openPopup(); })")
+    C.wait_for_selector('.leaflet-popup')
+    check(C.locator('.leaflet-popup [data-del-place]').count() == 0, 'viewer: no delete button')
+    A.click('.leaflet-popup [data-del-place]')
+    A.wait_for_function("!PLACES.some((p) => p.own)")
+    check(trip_places(A) == [], 'deleted on the server')
+    B.evaluate('refreshShared()')
+    B.wait_for_function("!PLACES.some((p) => p.own)")
+    check(True, 'and gone for the others after a refresh')
+
+    # 12. a pasted Google Maps link fills in the place (no network: a long URL is read directly)
+    LINK = ('https://www.google.com/maps/place/%EC%98%A4%EC%82%AC%EC%B9%B4+%EA%B3%B5%ED%95%AD+(%EC%9D%B4%ED%83%80%EB%AF%B8+%EA%B3%B5%ED%95%AD)/@34.7907912,135.4356809,16z/data=!3m1!4b1!4m6!3m5!1s0x6000f06df58777b9:0x7411a874d9df4cd!8m2!3d34.7861612!4d135.4380483!16zL20vMDFteWxq?entry=tts')
+    check(C.locator('.linkbox').count() == 0, 'viewer has no link box')
+    A.click('.linkbtn')
+    A.fill('.linkform [name=link]', '여기 어때 ' + LINK + ' 가보자')
+    A.click('.linkform button')
+    A.wait_for_selector('.newplace [name=name]')
+    check(A.input_value('.newplace [name=name]') == '오사카 공항 (이타미 공항)', 'the name is filled in from the link')
+    check('34.78616' in A.inner_text('.newplace') and '135.43805' in A.inner_text('.newplace'), f'the position is shown: {A.inner_text(".newplace")!r}')
+    A.select_option('.newplace [name=layer]', '교통')
+    A.click('.newplace .submit')
+    A.wait_for_function("PLACES.some((p) => p.own && p.name === '오사카 공항 (이타미 공항)')")
+    got = [p for p in trip_places(A) if p['name'].startswith('오사카')]
+    check(len(got) == 1 and got[0]['layer'] == '교통' and abs(got[0]['lat'] - 34.786161) < 1e-5 and abs(got[0]['lng'] - 135.438048) < 1e-5, f'saved with the pin position: {got}')
+
+    A.wait_for_function("!document.querySelector('.newplace')")  # the popup fades out for ~200ms after saving
+    A.click('.linkbtn')
+    A.fill('.linkform [name=link]', 'https://evil.example/maps/place/x/@1,1,1z')
+    A.click('.linkform button')
+    A.wait_for_function("document.body.innerText.includes('링크만 읽을 수')")
+    check(A.locator('.newplace').count() == 0, 'a link outside Google is refused with a message and opens no form')
+    # Kakao Map's link format carries the position itself (no network needed); the box stays open after a refused link
+    check(A.is_visible('.linkform'), 'the link box stays open after a refused link so it can be corrected')
+    A.fill('.linkform [name=link]', 'https://map.kakao.com/link/map/%EC%B9%B4%EC%B9%B4%EC%98%A4%ED%8C%90%EA%B5%90%EC%98%A4%ED%94%BC%EC%8A%A4,37.402056,127.108212')
+    A.click('.linkform button')
+    A.wait_for_selector('.newplace [name=name]')
+    check(A.input_value('.newplace [name=name]') == '카카오판교오피스' and '37.40206' in A.inner_text('.newplace'), 'a Kakao Map link fills in the name and position')
+    A.keyboard.press('Escape')
+    A.evaluate("callServer('deletePlace', PLACES.find((p) => p.own).id).then(() => refreshExpenses())")
+    A.wait_for_function("!PLACES.some((p) => p.own)")
+
     check(not errs, f'no page errors {errs}')
     b.close()
 

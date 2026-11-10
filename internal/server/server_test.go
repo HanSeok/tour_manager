@@ -324,3 +324,30 @@ func TestRealSheetsBootstrapIsNotSample(t *testing.T) {
 		t.Errorf("sample must be false: %s", rec.Body.String())
 	}
 }
+
+func TestPlacesEndToEndWithRoles(t *testing.T) {
+	h := devServer(t)
+	editor := login(t, h, "dev-editor@example.com")
+	viewer := login(t, h, "dev-viewer@example.com")
+	const pid = "44444444-4444-4444-8444-444444444444"
+	place := `{"id":"` + pid + `","name":"슈리성","layer":"관광","lat":26.217,"lng":127.7195,"memo":"아침에"}`
+
+	if code, _ := call(t, h, viewer, "addPlace", "["+place+"]"); code != 403 {
+		t.Errorf("viewer add: %d", code)
+	}
+	code, r := call(t, h, editor, "addPlace", "["+place+"]")
+	if code != 200 || !strings.Contains(string(r.Data), `"createdBy":"dev-editor@example.com"`) {
+		t.Fatalf("editor add: %d %s", code, r.Data)
+	}
+	_, r = call(t, h, viewer, "bootstrap", "[]")
+	if !strings.Contains(string(r.Data), `"tripPlaces":[{"id":"`+pid+`"`) {
+		t.Errorf("a viewer sees the place after bootstrap: %s", r.Data)
+	}
+	if code, _ := call(t, h, editor, "deletePlace", `["`+pid+`"]`); code != 200 {
+		t.Errorf("delete: %d", code)
+	}
+	_, r = call(t, h, viewer, "refresh", "[]")
+	if !strings.Contains(string(r.Data), `"tripPlaces":[]`) {
+		t.Errorf("refresh after delete: %s", r.Data)
+	}
+}

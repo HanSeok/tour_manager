@@ -25,6 +25,7 @@ const KIND_ICON = { flightIn: '✈️', flightOut: '✈️', hotelIn: '🏨', ho
 const MAX_AMOUNT_DIGITS = 8;
 const MAX_STAY_MIN = 720;
 const NO_PLACES_MSG = '아직 장소가 없습니다. 설정한 My Maps 지도에 가고 싶은 곳을 추가하면 여기에서 동선을 짤 수 있습니다 (반영까지 최대 10분).';
+const noPlacesMsg = () => (IS_API ? '아직 장소가 없습니다. 지도를 눌러 가고 싶은 곳을 추가하면 여기에서 동선을 짤 수 있습니다.' : NO_PLACES_MSG);
 // Apps Script strips double-slash text inside template literals, so URL prefixes live in plain strings.
 const GMAPS = 'https://www.google.com/maps';
 const OSM_TILES = 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
@@ -143,6 +144,16 @@ function placeFromMyMaps(m) {
     url: String(d['지도링크'] || '').startsWith('https:') ? d['지도링크'] : `${GMAPS}/search/?api=1&query=${m.lat},${m.lng}`, // https only (no javascript:)
   };
 }
+
+/* Go server: places the members add themselves (tap the map). They live in the sheet's 장소 tab. */
+let BASE_PLACES = []; // dev sample places (never saved); the trip's own places are added on top
+const placeFromTrip = (p) => ({
+  id: p.id, name: p.name, layer: p.layer, category: '직접 추가', lat: p.lat, lng: p.lng, hours: null, rating: null, reviews: null, price: '',
+  memo: p.memo || '', url: `${GMAPS}/search/?api=1&query=${p.lat},${p.lng}`, own: true,
+  createdBy: p.createdBy, updatedBy: p.updatedBy, updatedAt: p.updatedAt,
+});
+const tripPlacesOf = (list) => [...BASE_PLACES, ...(list || []).map(placeFromTrip)];
+const applyTripPlaces = (list) => setPlaces(tripPlacesOf(list));
 
 // ponytail: swaps the shared PLACES/byId in place (they are module-level consts used everywhere).
 function setPlaces(list) {
@@ -281,10 +292,12 @@ function renderMap(plan) {
   Object.values(byId).forEach((p) => {
     const isOnRoute = p.id in label;
     const visible = state.layer === '전체' || state.layer === p.layer || isOnRoute;
-    const action = !isEditable() ? '' : userIds.has(p.id) ? `<button data-del-id="${esc(p.id)}">동선에서 빼기</button>`
-      : isOnRoute ? '' : `<button data-add="${esc(p.id)}">동선에 추가</button>`;
+    const own = p.own ? `<small class="by">✍ ${esc(whoName(p.createdBy))}${p.memo ? ` · ${esc(p.memo)}` : ''}</small>` : '';
+    const delPlace = p.own && isEditable() ? `<button data-del-place="${esc(p.id)}">장소 삭제</button>` : '';
+    const action = (!isEditable() ? '' : userIds.has(p.id) ? `<button data-del-id="${esc(p.id)}">동선에서 빼기</button>`
+      : isOnRoute ? '' : `<button data-add="${esc(p.id)}">동선에 추가</button>`) + delPlace;
     L.marker([p.lat, p.lng], { icon: pinIcon(layerColor(p.layer), label[p.id] ?? initial(p)), opacity: visible ? 1 : 0.25, zIndexOffset: isOnRoute ? 1000 : 0 })
-      .bindPopup(`<div class="pop"><b>${esc(p.name)}</b><p>${esc(p.category)}${p.rating ? ` · ★${p.rating} (${p.reviews ?? 0})` : ''}${p.price ? ` · ${esc(p.price)}` : ''}<br>${md(plan.date)}(${WD[plan.wd]}) ${esc(hoursText(p, plan.wd))}</p>${action}<a href="${esc(p.url)}" target="_blank" rel="noopener">Google 지도 ↗</a></div>`)
+      .bindPopup(`<div class="pop"><b>${esc(p.name)}</b><p>${esc(p.category)}${p.rating ? ` · ★${p.rating} (${p.reviews ?? 0})` : ''}${p.price ? ` · ${esc(p.price)}` : ''}<br>${md(plan.date)}(${WD[plan.wd]}) ${esc(hoursText(p, plan.wd))}</p>${own}${action}<a href="${esc(p.url)}" target="_blank" rel="noopener">Google 지도 ↗</a></div>`)
       .addTo(pins);
   });
   const pts = [plan.start, ...plan.stops].filter(isLocated).map((p) => [p.lat, p.lng]);
@@ -292,9 +305,86 @@ function renderMap(plan) {
 }
 // Leaflet swallows some clicks inside popups → bind directly when opened.
 map.on('popupopen', (e) => {
-  const b = e.popup.getElement().querySelector('button');
-  if (b) b.addEventListener('click', () => { map.closePopup(); handleButton(b.dataset); });
+  const el = e.popup.getElement();
+  const form = el.querySelector('.newplace');
+  if (form) { // the new-place form (Go server): its own submit, not a dashboard action
+    form.addEventListener('submit', (ev) => { ev.preventDefault(); submitNewPlace(form, e.popup.getLatLng()); });
+    form.querySelector('[name=name]').focus();
+    return;
+  }
+  el.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => { map.closePopup(); handleButton(b.dataset); }));
 });
+
+// The new-place form (Go server): opened by tapping the map, or by a pasted Google Maps link (name and position filled in).
+function openNewPlaceForm(ll, name = '', layer = '', memo = '') {
+  L.popup({ minWidth: 230 }).setLatLng(ll).setContent(`<form class="pop newplace"><b>새 장소</b>
+    <small>${ll.lat.toFixed(5)}, ${ll.lng.toFixed(5)}</small>
+    <input name="name" placeholder="장소 이름" maxlength="60" required value="${esc(name)}">
+    <select name="layer" aria-label="분류">${LAYERS.map((l) => `<option${l === layer ? ' selected' : ''}>${l}</option>`).join('')}</select>
+    <input name="memo" placeholder="메모 (선택)" maxlength="200" value="${esc(memo.slice(0, 200))}">
+    <button type="submit" class="submit">추가</button></form>`).openOn(map);
+}
+
+map.on('click', (e) => {
+  if (!IS_API || !isEditable()) return;
+  openNewPlaceForm(map.wrapLatLng(e.latlng));
+});
+
+/** Paste a Google Maps share link: the server follows it and returns the place's name and position. */
+function findFromLink(form) {
+  const text = form.link.value.trim();
+  if (!text) return;
+  const btn = form.querySelector('button');
+  btn.disabled = true; btn.textContent = '찾는 중…';
+  callServer('resolvePlaceLink', text)
+    .then((r) => {
+      form.link.value = ''; form.hidden = true;
+      const ll = L.latLng(r.lat, r.lng);
+      map.setView(ll, Math.max(map.getZoom(), 16));
+      openNewPlaceForm(ll, r.name, r.layer, r.address || '');
+    })
+    .catch((e) => showError(`링크를 읽지 못했습니다: ${e.message}`))
+    .finally(() => { btn.disabled = false; btn.textContent = '찾기'; });
+}
+
+let linkControl = null;
+function addLinkControl() {
+  if (linkControl) return;
+  const Box = L.Control.extend({
+    onAdd() {
+      const box = L.DomUtil.create('div', 'linkbox');
+      box.innerHTML = `<button type="button" class="linkbtn" title="구글 지도·카카오맵에서 공유한 링크로 장소 추가">🔗 링크로 추가</button>
+        <form class="linkform" hidden><input name="link" placeholder="구글 지도·카카오맵 공유 링크를 붙여 넣으세요" aria-label="지도 링크"><button type="submit">찾기</button></form>`;
+      L.DomEvent.disableClickPropagation(box);
+      L.DomEvent.disableScrollPropagation(box);
+      const form = box.querySelector('form');
+      box.querySelector('.linkbtn').addEventListener('click', () => { form.hidden = !form.hidden; if (!form.hidden) form.link.focus(); });
+      form.addEventListener('submit', (ev) => { ev.preventDefault(); findFromLink(form); });
+      return box;
+    },
+  });
+  linkControl = new Box({ position: 'topleft' }).addTo(map);
+}
+
+function submitNewPlace(form, ll) {
+  const btn = form.querySelector('button');
+  btn.disabled = true;
+  const place = { id: newId(), name: form.name.value, layer: form.layer.value, lat: Number(ll.lat.toFixed(6)), lng: Number(ll.lng.toFixed(6)), memo: form.memo.value };
+  callWrite('addPlace', place)
+    .then((list) => { map.closePopup(); applyTripPlaces(list); render(); })
+    .catch((e) => { btn.disabled = false; showError(`장소를 추가하지 못했습니다: ${e.message}`); });
+}
+
+function runDeletePlace(id) {
+  const p = byId[id];
+  if (!p || !window.confirm(`'${p.name}' 장소를 삭제할까요? (동선에서도 빠집니다)`)) return;
+  callWrite('deletePlace', id, p.updatedAt)
+    .then((list) => { applyTripPlaces(list); render(); })
+    .catch((e) => {
+      if (e.status === 409 || e.status === 404) refreshExpenses(); // someone changed or removed it: show the current list
+      showError(`장소를 삭제하지 못했습니다: ${e.message}`);
+    });
+}
 
 /* ---------- route tab ---------- */
 const moveCtrl = (i) => `<button data-up="${i}" aria-label="위로">↑</button><button data-down="${i}" aria-label="아래로">↓</button>`;
@@ -409,7 +499,7 @@ const REG_BUTTON = {
 
 function renderRoute(plan) {
   if (!plan.start) {
-    $('#tab-route').innerHTML = `<div class="empty">${NO_PLACES_MSG}</div>`;
+    $('#tab-route').innerHTML = `<div class="empty">${noPlacesMsg()}</div>`;
     return;
   }
   const userIds = new Set(plan.stops.filter((s) => !s.fixed).map((s) => s.id));
@@ -446,8 +536,9 @@ function renderRoute(plan) {
     ${sortBtn}<ol class="timeline">${startCard(plan)}${legs}</ol>${empty}${footer}
     <div class="edit-only"><h2>장소 추가 · 누르면 동선에 붙음 (숙소·공항 도착 전)</h2>
     ${slotToolbar()}
+    ${IS_API && isEditable() ? '<p class="regnote">🗺 지도를 눌러 새 장소를 추가할 수 있습니다</p>' : ''}
     <div class="chips" style="margin-bottom:8px">${filters}</div>
-    ${PLACES.length ? `<div class="chips pick">${chips}</div>` : `<div class="empty">${NO_PLACES_MSG}</div>`}</div>`;
+    ${PLACES.length ? `<div class="chips pick">${chips}</div>` : `<div class="empty">${noPlacesMsg()}</div>`}</div>`;
 }
 
 /* ---------- plan tab (calendar first) ---------- */
@@ -560,6 +651,7 @@ function render() {
 function handleButton(ds) {
   if (ds.setupSettings) return runSetupSettings();
   if (ds.createTrip) return runCreateTrip();
+  if (ds.delPlace) return runDeletePlace(ds.delPlace);
   if (ds.tab) return setState({ tab: ds.tab, tabChosen: true });
   if (ds.date) return setState({ date: ds.date });
   if (ds.goto) return setState({ tab: 'route', date: ds.goto });
@@ -795,7 +887,7 @@ function startApp(res, placeList, { isStale = false } = {}) {
   const update = v && v.latest && v.latest !== v.current
     ? ` · <a href="${UPDATE_GUIDE_URL}" target="_blank" rel="noopener">새 버전 ${esc(v.latest)} 있음 (지금 ${esc(v.current)}) → 업데이트 방법</a>` : '';
   const parts = IS_API
-    ? [`${ME.name} (${ROLE_LABEL[ME.role]})`, res.sample ? '일정·장소는 샘플(개발용)' : '일정·장소 연동은 준비 중', '지출은 서버에 저장 · 동선은 이 브라우저에만 저장', ...(CAN_EDIT ? [] : ['보기 전용'])]
+    ? [`${ME.name} (${ROLE_LABEL[ME.role]})`, res.sample ? '일정·장소는 샘플(개발용)' : `일정 연동은 준비 중 · 장소 ${(res.tripPlaces || []).length}곳${CAN_EDIT ? ' (지도를 눌러 추가)' : ''}`, '지출·장소는 서버에 저장 · 동선은 이 브라우저에만 저장', ...(CAN_EDIT ? [] : ['보기 전용'])]
     : [isStale ? '지난번 데이터' : `캘린더 일정 ${res.events.length}개`, placeNote, ...airportNote, ...(mm.notes || []), CAN_EDIT ? '동선은 모두에게 공유 저장' : '보기 전용'];
   showBanner(parts.map(esc).join(' · ') + update);
   render();
@@ -813,7 +905,10 @@ function adoptShared(key, value) {
 /** Go server: only the expenses come from the server for now (routes, events and places stay in this browser). */
 function refreshExpenses() {
   return callServer('refresh')
-    .then((res) => { state = { ...state, expenses: state.saving ? state.expenses : res.expenses }; render(); })
+    .then((res) => {
+      if (res.tripPlaces) applyTripPlaces(res.tripPlaces);
+      state = { ...state, expenses: state.saving ? state.expenses : res.expenses }; render();
+    })
     .catch((e) => console.warn(`refresh failed: ${e.message}`));
 }
 const reloadExpenses = () => refreshExpenses();
@@ -850,9 +945,11 @@ function boot(retriesLeft) {
       if (IS_API) {
         ME = res.me;
         CAN_EDIT = ME.role !== 'viewer';
+        if (CAN_EDIT) addLinkControl();
         MEMBERS = Object.fromEntries((res.members || []).map((x) => [String(x.email).toLowerCase(), x]));
         // the dev server (fixtures) has no calendar / My Maps yet: show the sample day so the whole screen can be tried
-        startApp(res.sample ? { ...res, events: MOCK_RAW_EVENTS } : res, res.sample ? SAMPLE_PLACES : null);
+        BASE_PLACES = res.sample ? SAMPLE_PLACES : [];
+        startApp(res.sample ? { ...res, events: MOCK_RAW_EVENTS } : res, tripPlacesOf(res.tripPlaces));
       } else {
         store.set(BOOT_CACHE, res);
         startApp(res);

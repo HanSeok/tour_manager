@@ -10,6 +10,7 @@ import (
 
 	"tourmanager/internal/expenses"
 	"tourmanager/internal/members"
+	"tourmanager/internal/places"
 	"tourmanager/internal/sheets"
 	"tourmanager/internal/tripconfig"
 	"tourmanager/internal/trips"
@@ -25,6 +26,8 @@ type Trip struct {
 	CfgTTL   time.Duration                            // how long a read of the 설정 tab is reused (0 = read every time)
 	Sample   bool                                     // development fixtures: the dashboard may show its sample calendar / places
 	Conn     func(ctx context.Context) (bool, string) // is the owner connected to Google? (for the diagnose screen)
+	Links    PlaceLinks                               // reads a Google Maps share link (nil = not available)
+	Places   *places.Service                          // places members add themselves (nil = none, e.g. in tests)
 	Trips    TripManager                              // creates trips in the owner's Google Drive (nil = not available, e.g. sample data)
 
 	mu    sync.Mutex
@@ -43,6 +46,10 @@ func (t *Trip) Register(rt *Router) {
 	rt.Register("addExpense", PermWrite, t.AddExpense)
 	rt.Register("updateExpense", PermWrite, t.UpdateExpense)
 	rt.Register("deleteExpense", PermWrite, t.DeleteExpense)
+	rt.Register("resolvePlaceLink", PermWrite, t.ResolvePlaceLink)
+	rt.Register("addPlace", PermWrite, t.AddPlace)
+	rt.Register("updatePlace", PermWrite, t.UpdatePlace)
+	rt.Register("deletePlace", PermWrite, t.DeletePlace)
 }
 
 // LoadConfig reads and validates the 설정 tab. A missing tab is reported as "not configured", not as a failure.
@@ -120,6 +127,11 @@ func (t *Trip) Bootstrap(ctx context.Context, who Principal, _ []json.RawMessage
 	out := base(cfg)
 	out["events"], out["expenses"], out["state"], out["places"] = []any{}, list, map[string]any{}, nil
 	out["sample"], out["visits"], out["photos"] = t.Sample, []any{}, []any{}
+	if cfg.Configured() {
+		if out["tripPlaces"], err = t.placeList(ctx); err != nil {
+			return nil, sheetErr("bootstrap", err)
+		}
+	}
 	if !cfg.Configured() && who.Role.CanManage() {
 		out["checks"] = t.checks(ctx)
 	}
@@ -135,14 +147,26 @@ func (t *Trip) Refresh(ctx context.Context, _ Principal, _ []json.RawMessage) (a
 	if err != nil {
 		return nil, sheetErr("refresh", err)
 	}
-	return map[string]any{"state": map[string]any{}, "expenses": list, "events": []any{}}, nil
+	pl, err := t.placeList(ctx)
+	if err != nil {
+		return nil, sheetErr("refresh", err)
+	}
+	return map[string]any{"state": map[string]any{}, "expenses": list, "events": []any{}, "tripPlaces": pl}, nil
 }
 
 // sheetErr turns a storage failure into a safe message (details go to the log, not to the browser).
 func sheetErr(op string, err error) error {
 	var ve *expenses.ValidationError
 	var ee *expenses.Error
+	var pv *places.ValidationError
+	var pe *places.Error
 	switch {
+	case errors.As(err, &pv):
+		return Errf(422, pv.Msg)
+	case errors.As(err, &pe) && pe.Kind == places.NotFound:
+		return Errf(404, pe.Msg)
+	case errors.As(err, &pe) && pe.Kind == places.Conflict:
+		return Errf(409, pe.Msg)
 	case errors.As(err, &ve):
 		return Errf(422, ve.Msg)
 	case errors.As(err, &ee) && ee.Kind == expenses.NotFound:

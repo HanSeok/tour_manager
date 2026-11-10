@@ -21,7 +21,9 @@ import (
 	"tourmanager/internal/auth"
 	"tourmanager/internal/drive"
 	"tourmanager/internal/expenses"
+	"tourmanager/internal/maplink"
 	"tourmanager/internal/members"
+	"tourmanager/internal/places"
 	"tourmanager/internal/sheets"
 	"tourmanager/internal/trips"
 )
@@ -305,6 +307,8 @@ func New(cfg Config) (http.Handler, error) {
 	(&api.Trip{
 		Grid: grid, Members: dir, Version: cfg.Version, CfgTTL: configTTL, Sample: cfg.FixtureDir != "", Conn: conn,
 		Expenses: &expenses.Service{Grid: grid, Log: &audit.GridLog{Grid: grid}},
+		Links:    &maplink.Resolver{HTTP: &http.Client{Timeout: 8 * time.Second}},
+		Places:   &places.Service{Grid: grid, Log: &audit.GridLog{Grid: grid}},
 		Trips:    tripManager(tripSvc),
 	}).Register(rt)
 

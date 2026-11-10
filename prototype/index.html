@@ -200,6 +200,14 @@ body.readonly .start-place, body.readonly .start-time, body.readonly .ev-place {
 .settle .plus { color: var(--leaf); font-weight: 700; } .settle .minus { color: var(--coral); font-weight: 700; }
 .settle .move { grid-template-columns: 1fr auto; background: var(--sun-soft); font-weight: 600; }
 .settle .move small { color: var(--muted); font-weight: 500; }
+.linkbox { background: var(--card, #fff); border-radius: 10px; padding: 6px; box-shadow: 0 1px 6px rgba(0,0,0,.25); }
+.linkbox .linkform { display: flex; gap: 4px; margin-top: 6px; }
+.linkbox .linkform[hidden] { display: none; }
+.linkbox input { font: inherit; padding: 5px 7px; width: min(230px, 55vw); border: 1px solid var(--line); border-radius: 6px; }
+.linkbox button { font: inherit; cursor: pointer; }
+.pop.newplace { display: grid; gap: 6px; }
+.pop.newplace input, .pop.newplace select { font: inherit; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; }
+.pop .by { display: block; color: var(--muted); }
 .newtrip { display: grid; gap: 8px; max-width: 420px; text-align: left; }
 .newtrip label { display: grid; gap: 2px; font-size: 13px; color: var(--muted); }
 .newtrip input, .newtrip select { font: inherit; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }

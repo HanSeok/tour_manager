@@ -16,6 +16,7 @@ import (
 	"tourmanager/internal/drive"
 	"tourmanager/internal/expenses"
 	"tourmanager/internal/members"
+	"tourmanager/internal/places"
 	"tourmanager/internal/sheets"
 	"tourmanager/internal/tripconfig"
 )
@@ -145,6 +146,9 @@ func (s *Service) provision(ctx context.Context, sh Sheet, cfg tripconfig.Config
 		return err
 	}
 	if _, err := sh.EnsureTab(ctx, cfg.ExpenseSheet, expenses.Header(cfg)); err != nil {
+		return err
+	}
+	if _, err := sh.EnsureTab(ctx, places.Tab, places.Header); err != nil {
 		return err
 	}
 	_, err := sh.EnsureTab(ctx, audit.Tab, audit.Header)

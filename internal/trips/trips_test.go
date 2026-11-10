@@ -13,6 +13,7 @@ import (
 	"tourmanager/internal/drive"
 	"tourmanager/internal/expenses"
 	"tourmanager/internal/members"
+	"tourmanager/internal/places"
 	"tourmanager/internal/sheets"
 	"tourmanager/internal/tripconfig"
 )
@@ -82,6 +83,10 @@ func TestCreateBuildsAConfiguredTripSheet(t *testing.T) {
 	erows, err := e.grid.Rows(ctx, cfg.ExpenseSheet)
 	if err != nil || len(erows) != 1 || strings.Join(erows[0], "|") != strings.Join(expenses.Header(cfg), "|") {
 		t.Errorf("expense tab = %v (%v)", erows, err)
+	}
+	prows, err := e.grid.Rows(ctx, places.Tab)
+	if err != nil || len(prows) != 1 || strings.Join(prows[0], "|") != strings.Join(places.Header, "|") {
+		t.Errorf("places tab = %v (%v)", prows, err)
 	}
 	hrows, err := e.grid.Rows(ctx, audit.Tab)
 	if err != nil || len(hrows) != 1 || strings.Join(hrows[0], "|") != strings.Join(audit.Header, "|") {
